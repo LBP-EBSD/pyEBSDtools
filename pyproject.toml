@@ -1,0 +1,7 @@
+[tool.pyright]
+pythonVersion = "3.10"
+exclude = ["*.py"]
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
