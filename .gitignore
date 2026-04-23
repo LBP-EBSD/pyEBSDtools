@@ -1,0 +1,41 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+pip-wheel-metadata/
+
+# Envs
+venv/
+.venv/
+env/
+ENV/
+.env
+
+# Env files
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+*.conda
+
+# Logs
+*.log
