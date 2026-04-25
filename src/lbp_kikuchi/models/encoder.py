@@ -1,27 +1,29 @@
-# src/lbp_kikuchi/models/encoder.py
-
 import torch.nn as nn
 import torchvision.models as models
 
+
 class Encoder(nn.Module):
-    def __init__(self, out_dim=128):
+    """
+    ResNet18 adapted to grayscale EBSD patterns.
+
+    Input:  (B, 1, H, W)
+    Output: (B, out_dim)
+
+    First conv weights are averaged over the RGB dimension to preserve pretrained
+    spatial structure when collapsing 3 channels → 1.
+    """
+
+    def __init__(self, out_dim: int = 128):
         super().__init__()
 
-        # backbone = models.resnet18(pretrained=False)
-        # backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        net = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
 
-        backbone = models.resnet18(pretrained=True)
-        
-        # average weights across RGB → 1 channel
-        w = backbone.conv1.weight
-        backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        backbone.conv1.weight.data = w.mean(dim=1, keepdim=True)
-        
-        self.backbone = nn.Sequential(*list(backbone.children())[:-1])
+        w = net.conv1.weight.data  # (64, 3, 7, 7)
+        net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        net.conv1.weight.data = w.mean(dim=1, keepdim=True)
 
-        self.fc = nn.Linear(512, out_dim)
+        net.fc = nn.Linear(512, out_dim)
+        self.net = net
 
     def forward(self, x):
-        x = self.backbone(x)      # (B,512,1,1)
-        x = x.flatten(1)
-        return self.fc(x)
+        return self.net(x)

@@ -42,3 +42,21 @@ Thumbs.db
 
 #external data
 data/
+#outputs
+outputs/
+
+# PyTorch checkpoints
+*.pt
+*.pth
+
+# Large data files — never commit regardless of location
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Hydra multirun sweeps
+multirun/
+
+# Jupyter
+.ipynb_checkpoints/

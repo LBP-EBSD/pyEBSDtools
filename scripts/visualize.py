@@ -16,17 +16,12 @@ Usage:
 
 import argparse
 import os
-import sys
 
-import h5py
 import numpy as np
-import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from load_data import EBSDDataLoader
+from lbp_kikuchi.data.loader import EBSDDataLoader
 
 
 def plot_grid(loader, output_path=None, cols=None, cmap='gray'):

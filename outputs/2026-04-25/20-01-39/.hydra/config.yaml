@@ -1,9 +1,0 @@
-training:
-  epochs: 10
-  batch_size: 32
-  lr: 0.001
-model:
-  feature_dim: 128
-data:
-  path: data/processed/
-  target: strain
