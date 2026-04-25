@@ -1,4 +1,5 @@
 CONFIG ?= config.yaml
+PYTHON ?= $(shell command -v python3 || command -v python)
 
 .PHONY: help generate sample simulate convert validate \
         setup-xtal preview \
@@ -49,28 +50,28 @@ help:
 # ─────────────────────────────────────────────────────────────────────────────
 
 generate:
-	python datagen/pipeline.py --config $(CONFIG)
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG)
 
 sample:
-	python datagen/pipeline.py --config $(CONFIG) \
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) \
 		--skip-simulate --skip-convert
 
 simulate:
-	python datagen/pipeline.py --config $(CONFIG) \
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) \
 		--skip-sample --skip-convert
 
 convert:
-	python datagen/pipeline.py --config $(CONFIG) \
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) \
 		--skip-sample --skip-simulate
 
 validate:
-	python datagen/pipeline.py --config $(CONFIG) --validate-only
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) --validate-only
 
 skip-simulate:
-	python datagen/pipeline.py --config $(CONFIG) --skip-simulate
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) --skip-simulate
 
 skip-sample:
-	python datagen/pipeline.py --config $(CONFIG) --skip-sample
+	$(PYTHON) datagen/pipeline.py --config $(CONFIG) --skip-sample
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Setup targets
@@ -78,11 +79,11 @@ skip-sample:
 
 setup-xtal:
 	@echo "Setting up Fe_FCC.xtal crystal file..."
-	@XTAL_DIR=$$(python -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
+	@XTAL_DIR=$$($(PYTHON) -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
 		print(os.path.expanduser(cfg['paths']['xtal_dir']))"); \
-	XTAL_NAME=$$(python -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); \
+	XTAL_NAME=$$($(PYTHON) -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); \
 		print(cfg['emsoft']['xtalname'])"); \
-	DATA_DIR=$$(python -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
+	DATA_DIR=$$($(PYTHON) -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
 		print(os.path.expanduser(cfg['paths']['data_dir']))"); \
 	mkdir -p $$XTAL_DIR; \
 	TARGET="$$XTAL_DIR/$$XTAL_NAME"; \
@@ -94,7 +95,7 @@ setup-xtal:
 		cp "$$DATA_DIR/$$XTAL_NAME" "$$TARGET"; \
 		echo "[setup-xtal] Copied $$DATA_DIR/$$XTAL_NAME → $$TARGET"; \
 	else \
-		IMAGE=$$(python -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); \
+		IMAGE=$$($(PYTHON) -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); \
 			print(cfg['docker']['image'])"); \
 		echo "[setup-xtal] Not found on host — fetching from Docker image $$IMAGE..."; \
 		docker run --rm \
@@ -112,13 +113,13 @@ setup-xtal:
 	echo "[setup-xtal] Complete."
 
 preview:
-	@H5=$$(python -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
-		raw=os.path.expanduser(cfg['paths']['raw_dir']); \
+	@H5=$$($(PYTHON) -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); \
+		data=os.path.expanduser(cfg['paths']['data_dir']); \
 		exp=cfg['paths']['experiment_name']; \
-		print(os.path.join(raw, exp, 'Fe_EBSD_patterns.h5'))"); \
+		print(os.path.join(data, exp, 'Fe_EBSD_patterns.h5'))"); \
 	echo "Previewing: $$H5"; \
-	python scripts/visualize.py $$H5 2>/dev/null || \
-	python visualize.py $$H5
+	$(PYTHON) scripts/visualize.py $$H5 2>/dev/null || \
+	$(PYTHON) visualize.py $$H5
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Docker targets
