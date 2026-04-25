@@ -1,8 +1,9 @@
 CONFIG ?= config.yaml
-PYTHON ?= $(shell command -v python3 || command -v python)
+# Use .venv if it exists (created by `make venv`), otherwise fall back to system python3
+PYTHON ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || (command -v python3 || command -v python))
 
 .PHONY: help generate sample simulate convert validate \
-        setup-xtal preview \
+        setup-xtal preview venv \
         docker-pull docker-build docker-check clean clean-raw clean-processed
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -14,8 +15,8 @@ help:
 	@echo "  EMsoft EBSD Data Generation Pipeline"
 	@echo "  ─────────────────────────────────────────────────────────────"
 	@echo "  FIRST TIME SETUP (run once):"
+	@echo "  make venv                Create .venv and install Python deps"
 	@echo "  make docker-pull         Pull pre-built EMsoft image"
-	@echo "  make setup-xtal          Copy Ni.xtal → Fe_FCC.xtal in xtal_dir"
 	@echo ""
 	@echo "  GENERATE DATA:"
 	@echo "  make generate            Full pipeline (all 4 stages)"
@@ -44,6 +45,18 @@ help:
 	@echo ""
 	@echo "  CONFIG = $(CONFIG)"
 	@echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment setup
+# ─────────────────────────────────────────────────────────────────────────────
+
+venv:
+	python3 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install numpy h5py pyyaml
+	@echo ""
+	@echo "  Virtual env ready. You can now run: make generate"
+	@echo "  (The Makefile uses .venv automatically — no need to activate it.)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline targets

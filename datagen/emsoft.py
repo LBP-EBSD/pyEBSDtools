@@ -272,14 +272,22 @@ class DockerRunner:
             f"echo '[emsoft] Xtal ready: /tmp/XtalFolder/{xtalname} (from container EMsoftData)' && "
         )
 
+        mc_out = f"{exp}/Fe_MCoutput.h5"
+        master_out = f"{exp}/Fe_EBSDmaster.h5"
+
+        # EMMCOpenCL exits 0 even on fatal errors (Fortran STOP) — check output
+        # files explicitly so we fail fast instead of running downstream steps on
+        # missing inputs.
         bash_script = (
             f"set -e && "
             f"{xtal_setup}"
             f"cd /home/EMuser/EMPlay && "
             f"echo '[emsoft] Step 1: Monte Carlo...' && "
-            f"EMMCOpenCL {exp}/EMMCOpenCL.nml && "
+            f"EMMCOpenCL {exp}/EMMCOpenCL.nml ; "
+            f"[ -f {mc_out} ] || {{ echo '[emsoft] FATAL: EMMCOpenCL produced no output ({mc_out})'; exit 1; }} && "
             f"echo '[emsoft] Step 2: Master pattern...' && "
-            f"{master_cmd} && "
+            f"{master_cmd} ; "
+            f"[ -f {master_out} ] || {{ echo '[emsoft] FATAL: master step produced no output ({master_out})'; exit 1; }} && "
             f"echo '[emsoft] Step 3: Pattern generation...' && "
             f"EMEBSD {exp}/EMEBSD.nml && "
             f"echo '[emsoft] Done.'"
@@ -287,10 +295,18 @@ class DockerRunner:
 
         gpu_flags = self._gpu_flags() if use_gpu else []
 
+        # Mount the host's OpenCL ICD vendors so the container can find the
+        # NVIDIA OpenCL platform (needed when NVIDIA Container Toolkit is not
+        # fully propagating ICDs into the container).
+        opencl_mounts = []
+        if os.path.isdir("/etc/OpenCL/vendors"):
+            opencl_mounts = ["-v", "/etc/OpenCL/vendors:/etc/OpenCL/vendors:ro"]
+
         # No need to mount XtalFolder — we use the container's internal xtal files.
         cmd = [
             "docker", "run", "--rm",
             *gpu_flags,
+            *opencl_mounts,
             "-v", f"{self.host_data_dir}:{_CONTAINER_EMPLAY}",
             self.image,
             "bash", "-c", bash_script,
@@ -299,6 +315,8 @@ class DockerRunner:
         print(f"[docker] Running EMsoft pipeline (gpu={use_gpu})...")
         print(f"[docker] Image : {self.image}")
         print(f"[docker] Data  : {self.host_data_dir} → {_CONTAINER_EMPLAY}")
+        if opencl_mounts:
+            print(f"[docker] OpenCL: /etc/OpenCL/vendors mounted from host")
         print(f"[docker] Xtal  : container-internal /home/EMs/EMsoftData → /tmp/XtalFolder")
         print()
 

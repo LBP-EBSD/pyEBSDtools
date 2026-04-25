@@ -42,7 +42,7 @@ emsoft:
   # Monte Carlo
   n_mc_electrons:          50000000     # totnum_el — more = better MC statistics
                                          # 50M = fast test; use 2000000000 for production
-  mc_grid_size:            801          # numsx in EMMCOpenCL.nml
+  mc_grid_size:            501          # numsx in EMMCOpenCL.nml (use 801 for production)
 
   # Compute
   n_threads:               4
