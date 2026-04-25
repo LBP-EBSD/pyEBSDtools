@@ -1,18 +1,27 @@
+# src/lbp_kikuchi/models/encoder.py
+
 import torch.nn as nn
+import torchvision.models as models
 
 class Encoder(nn.Module):
-    def __init__(self, feat_dim=64):
+    def __init__(self, out_dim=128):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1)
-        )
-        self.fc = nn.Linear(64, feat_dim)
+
+        # backbone = models.resnet18(pretrained=False)
+        # backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+
+        backbone = models.resnet18(pretrained=True)
+        
+        # average weights across RGB → 1 channel
+        w = backbone.conv1.weight
+        backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        backbone.conv1.weight.data = w.mean(dim=1, keepdim=True)
+        
+        self.backbone = nn.Sequential(*list(backbone.children())[:-1])
+
+        self.fc = nn.Linear(512, out_dim)
 
     def forward(self, x):
-        x = self.net(x)
-        x = x.view(x.size(0), -1)
+        x = self.backbone(x)      # (B,512,1,1)
+        x = x.flatten(1)
         return self.fc(x)
