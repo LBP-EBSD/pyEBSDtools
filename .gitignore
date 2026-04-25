@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Python cache
 __pycache__/
 *.py[cod]
@@ -63,3 +64,52 @@ multirun/
 
 #hydra
 hydralance/
+=======
+# ── Generated data (never commit raw or processed data) ──────────────────────
+data/
+outputs/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Editor ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Hydra (training run outputs) ─────────────────────────────────────────────
+outputs/
+multirun/
+
+# ── Model checkpoints ─────────────────────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+
+# ── Logs / metrics ────────────────────────────────────────────────────────────
+*.csv
+*.json
+!config.yaml
+!pyproject.toml
+>>>>>>> 88bf4c2 (add datagen pipeline)
