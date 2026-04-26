@@ -53,6 +53,7 @@ class Sampler:
         seed: int | None = None,
         xpc: float = 0.0,
         ypc: float = 0.0,
+        L: float = 15000.0,
     ):
         if strain_type not in STRAIN_TYPES:
             raise ValueError(f"Unknown strain_type {strain_type!r}. Choose from: {STRAIN_TYPES}")
@@ -63,6 +64,7 @@ class Sampler:
         self.rng = np.random.default_rng(seed)
         self.xpc = xpc
         self.ypc = ypc
+        self.L = L  # camera-to-sample distance in µm — pcs[3] in orpcdef format
 
     # ─── Public ───────────────────────────────────────────────────────────────
 
@@ -209,9 +211,12 @@ class Sampler:
         Format per data line (column-major F):
             euler1 euler2 euler3 xpc ypc F11 F21 F31 F12 F22 F32 F13 F23 F33
         """
-        # EMsoft reads exactly: line1=type, line2=count, then N data lines.
-        # Do NOT insert comment lines between header and data — EMEBSD parses them
-        # as real numbers and crashes with "Bad real number in item 1".
+        # orpcdef format (from EMsoft EBSDmod.f90 ebsdreadorpcdef):
+        #   line 1: angle type ('eu')
+        #   line 2: N (count)
+        #   lines 3..N+2: phi1 Phi phi2  xpc ypc L  F11 F21 F31 F12 F22 F32 F13 F23 F33
+        #                  (15 values; L = camera-to-sample distance in µm)
+        # No comment line — Fortran reads exactly 15 values per pattern with no skip.
         lines = ["eu", str(self.n_patterns)]
 
         for i in range(self.n_patterns):
@@ -219,8 +224,8 @@ class Sampler:
             F = F_tensors[i]
             line = (
                 f"{e[0]:10.4f} {e[1]:10.4f} {e[2]:10.4f} "
-                f"{self.xpc:6.2f} {self.ypc:6.2f} "
-                # column-major: col0, col1, col2
+                f"{self.xpc:8.2f} {self.ypc:8.2f} {self.L:10.2f} "
+                # column-major F: col0, col1, col2
                 f"{F[0,0]:14.8f} {F[1,0]:14.8f} {F[2,0]:14.8f} "
                 f"{F[0,1]:14.8f} {F[1,1]:14.8f} {F[2,1]:14.8f} "
                 f"{F[0,2]:14.8f} {F[1,2]:14.8f} {F[2,2]:14.8f}"
@@ -252,5 +257,6 @@ def run_from_config(cfg: dict) -> dict[str, str]:
         seed             = gen_cfg.get("seed"),
         xpc              = gen_cfg.get("xpc", 0.0),
         ypc              = gen_cfg.get("ypc", 0.0),
+        L                = cfg["emsoft"].get("camera_distance_um", 15000.0),
     )
     return sampler.save(exp_dir, paths_cfg["experiment_name"])

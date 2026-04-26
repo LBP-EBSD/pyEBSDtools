@@ -152,7 +152,7 @@ class NMLWriter:
         exp  = self.exp_name
         gen  = self.cfg["generation"]
         angles_file = f"{exp}/{exp}_angles.txt"
-        master_file = f"{exp}/Fe_EBSDmaster.h5"
+        master_file = f"{exp}/Fe_MCoutput.h5"   # master appends into the MC file
         data_file   = f"{exp}/Fe_EBSD_patterns.h5"
         return textwrap.dedent(f"""\
              &EBSDdata
@@ -236,12 +236,24 @@ class DockerRunner:
 
     def run_pipeline(self) -> None:
         """
-        Run the full 3-step EMsoft pipeline inside Docker.
+        Run the full 3-step EMsoft pipeline.
 
-        Raises subprocess.CalledProcessError if any step fails.
+        EMMCOpenCL always uses GPU/OpenCL. When use_gpu=True, EMEBSDmasterOpenCL
+        is used (fast GPU master). Because the GPU master writes a different HDF5
+        group name ('EBSDMasterOpenCLNameList') than what EMEBSD reads
+        ('EBSDMasterNameList'), we patch the file on the host with h5py between
+        the master and EMEBSD steps.
+
+        Pipeline:
+          Docker run 1: EMMCOpenCL + EMEBSDmaster[OpenCL]
+          Host step   : h5py group rename (GPU master only)
+          Docker run 2: EMEBSD
         """
         exp = self.exp_name
         use_gpu = self.ems.get("use_gpu", True)
+        xtalname = self.ems.get("xtalname", "Fe_FCC.xtal")
+        mc_out = os.path.join(self.host_data_dir, exp, "Fe_MCoutput.h5")
+        patterns_out = os.path.join(self.host_data_dir, exp, "Fe_EBSD_patterns.h5")
 
         master_cmd = (
             f"EMEBSDmasterOpenCL {exp}/EMEBSDmasterOCL.nml"
@@ -249,14 +261,15 @@ class DockerRunner:
             f"EMEBSDmaster {exp}/EMEBSDmaster.nml"
         )
 
-        xtalname = self.ems.get("xtalname", "Fe_FCC.xtal")
+        # GPU flags — always required because EMMCOpenCL always uses OpenCL.
+        gpu_flags = self._gpu_flags()
 
-        # The xtal file on the host may have been created with a different HDF5
-        # version than the binary inside this container, causing a segfault.
-        # Fix: copy Ni.xtal from the container's own EMsoftData clone (guaranteed
-        # HDF5-compatible) to /tmp/XtalFolder inside the container, then patch
-        # EMsoftConfig.json (writable by EMuser) to point there.
-        # This avoids any mounted-volume permission issues entirely.
+        # Mount the host's OpenCL ICD vendors so the container can find the
+        # NVIDIA OpenCL platform.
+        opencl_mounts = []
+        if os.path.isdir("/etc/OpenCL/vendors"):
+            opencl_mounts = ["-v", "/etc/OpenCL/vendors:/etc/OpenCL/vendors:ro"]
+
         xtal_setup = (
             f"XTAL_SRC=$(find /home/EMs/EMsoftData -name 'Ni.xtal' 2>/dev/null | head -1) && "
             f"if [ -z \"$XTAL_SRC\" ]; then "
@@ -269,58 +282,95 @@ class DockerRunner:
             f"c=json.load(open(cfg)); c['EMXtalFolderpathname']='/tmp/XtalFolder'; "
             f"json.dump(c, open(cfg,'w'), indent=4)"
             f"\" && "
-            f"echo '[emsoft] Xtal ready: /tmp/XtalFolder/{xtalname} (from container EMsoftData)' && "
+            f"echo '[emsoft] Xtal ready: /tmp/XtalFolder/{xtalname}' && "
         )
 
-        mc_out = f"{exp}/Fe_MCoutput.h5"
-        master_out = f"{exp}/Fe_EBSDmaster.h5"
-
-        # EMMCOpenCL exits 0 even on fatal errors (Fortran STOP) — check output
-        # files explicitly so we fail fast instead of running downstream steps on
-        # missing inputs.
-        bash_script = (
-            f"set -e && "
-            f"{xtal_setup}"
-            f"cd /home/EMuser/EMPlay && "
-            f"echo '[emsoft] Step 1: Monte Carlo...' && "
-            f"EMMCOpenCL {exp}/EMMCOpenCL.nml ; "
-            f"[ -f {mc_out} ] || {{ echo '[emsoft] FATAL: EMMCOpenCL produced no output ({mc_out})'; exit 1; }} && "
-            f"echo '[emsoft] Step 2: Master pattern...' && "
-            f"{master_cmd} ; "
-            f"[ -f {master_out} ] || {{ echo '[emsoft] FATAL: master step produced no output ({master_out})'; exit 1; }} && "
-            f"echo '[emsoft] Step 3: Pattern generation...' && "
-            f"EMEBSD {exp}/EMEBSD.nml && "
-            f"echo '[emsoft] Done.'"
-        )
-
-        gpu_flags = self._gpu_flags() if use_gpu else []
-
-        # Mount the host's OpenCL ICD vendors so the container can find the
-        # NVIDIA OpenCL platform (needed when NVIDIA Container Toolkit is not
-        # fully propagating ICDs into the container).
-        opencl_mounts = []
-        if os.path.isdir("/etc/OpenCL/vendors"):
-            opencl_mounts = ["-v", "/etc/OpenCL/vendors:/etc/OpenCL/vendors:ro"]
-
-        # No need to mount XtalFolder — we use the container's internal xtal files.
-        cmd = [
-            "docker", "run", "--rm",
-            *gpu_flags,
-            *opencl_mounts,
-            "-v", f"{self.host_data_dir}:{_CONTAINER_EMPLAY}",
-            self.image,
-            "bash", "-c", bash_script,
-        ]
+        def _docker_cmd(bash: str) -> list[str]:
+            return [
+                "docker", "run", "--rm",
+                *gpu_flags,
+                *opencl_mounts,
+                "-v", f"{self.host_data_dir}:{_CONTAINER_EMPLAY}",
+                self.image,
+                "bash", "-c", bash,
+            ]
 
         print(f"[docker] Running EMsoft pipeline (gpu={use_gpu})...")
         print(f"[docker] Image : {self.image}")
         print(f"[docker] Data  : {self.host_data_dir} → {_CONTAINER_EMPLAY}")
         if opencl_mounts:
             print(f"[docker] OpenCL: /etc/OpenCL/vendors mounted from host")
-        print(f"[docker] Xtal  : container-internal /home/EMs/EMsoftData → /tmp/XtalFolder")
         print()
 
-        self._run_cmd(cmd, stream=True)
+        # ── Docker run 1: MC + master ─────────────────────────────────────────
+        mc_container = os.path.join(exp, "Fe_MCoutput.h5")
+        script_mc_master = (
+            f"set -e && "
+            f"{xtal_setup}"
+            f"cd /home/EMuser/EMPlay && "
+            f"echo '[emsoft] Step 1: Monte Carlo...' && "
+            f"EMMCOpenCL {exp}/EMMCOpenCL.nml ; "
+            f"[ -f {mc_container} ] || {{ echo '[emsoft] FATAL: EMMCOpenCL produced no output'; exit 1; }} && "
+            f"echo '[emsoft] Step 2: Master pattern...' && "
+            f"{master_cmd}"
+        )
+        self._run_cmd(_docker_cmd(script_mc_master), stream=True)
+
+        # ── Host step: patch HDF5 group name (GPU master only) ────────────────
+        if use_gpu:
+            self._patch_master_group(mc_out)
+
+        # ── Docker run 2: EMEBSD pattern generation ───────────────────────────
+        patterns_container = os.path.join(exp, "Fe_EBSD_patterns.h5")
+        script_ebsd = (
+            f"set -e && "
+            f"{xtal_setup}"           # xtal needed here too (new container, clean /tmp)
+            f"cd /home/EMuser/EMPlay && "
+            f"echo '[emsoft] Step 3: Pattern generation...' && "
+            f"EMEBSD {exp}/EMEBSD.nml ; "
+            f"[ -f {patterns_container} ] || {{ echo '[emsoft] FATAL: EMEBSD produced no output'; exit 1; }} && "
+            f"echo '[emsoft] Done.'"
+        )
+        self._run_cmd(_docker_cmd(script_ebsd), stream=True)
+
+    def _patch_master_group(self, h5_path: str) -> None:
+        """
+        Copy NMLparameters/EBSDMasterOpenCLNameList →
+              NMLparameters/EBSDMasterNameList
+        inside Fe_MCoutput.h5 so EMEBSD can read GPU-master output.
+
+        The file is owned by EMuser (uid=501, created inside Docker). The host
+        user can't open it for writing, so we first chmod it via Docker (as root),
+        then patch with h5py on the host, then restore sane permissions.
+        """
+        import h5py
+        src_name = "EBSDMasterOpenCLNameList"
+        dst_name = "EBSDMasterNameList"
+
+        print(f"[h5py] Patching master group: {src_name} → {dst_name}")
+
+        # The file is owned by EMuser inside the container. Use Docker as root
+        # to make it world-writable so the host user can open it with h5py.
+        container_path = h5_path.replace(self.host_data_dir, _CONTAINER_EMPLAY, 1)
+        self._run_cmd([
+            "docker", "run", "--rm", "--user", "root",
+            "-v", f"{self.host_data_dir}:{_CONTAINER_EMPLAY}",
+            self.image,
+            "chmod", "666", container_path,
+        ])
+
+        with h5py.File(h5_path, "a") as f:
+            nml = f["NMLparameters"]
+            if dst_name in nml:
+                print(f"[h5py] {dst_name} already present — skipping patch.")
+                return
+            if src_name not in nml:
+                raise RuntimeError(
+                    f"[h5py] Neither {src_name} nor {dst_name} found in "
+                    f"NMLparameters — did the GPU master run succeed?"
+                )
+            nml.copy(src_name, nml, name=dst_name)
+        print(f"[h5py] Patch complete.")
 
     # ─── Internal ─────────────────────────────────────────────────────────────
 

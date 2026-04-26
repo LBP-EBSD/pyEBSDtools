@@ -2,8 +2,15 @@ CONFIG ?= config.yaml
 # Use .venv if it exists (created by `make venv`), otherwise fall back to system python3
 PYTHON ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || (command -v python3 || command -v python))
 
-.PHONY: help generate sample simulate convert validate \
-        setup-xtal preview venv \
+# Remote sync target — override on command line if needed:
+#   make sync REMOTE_HOST=user@otherhost REMOTE_DIR=~/some/path
+REMOTE_HOST ?= cosign@kratos.sdslabs.org
+REMOTE_DIR  ?= ~/lbp/pyEBSDtools/
+SSH_KEY     ?= ~/.ssh/id_ed25519
+SSH_PORT    ?= 22
+
+.PHONY: help generate generate-bg sample simulate convert validate \
+        setup-xtal preview venv sync ebsd resample \
         docker-pull docker-build docker-check clean clean-raw clean-processed
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17,6 +24,10 @@ help:
 	@echo "  FIRST TIME SETUP (run once):"
 	@echo "  make venv                Create .venv and install Python deps"
 	@echo "  make docker-pull         Pull pre-built EMsoft image"
+	@echo ""
+	@echo "  REMOTE SYNC:"
+	@echo "  make sync                Push code to $(REMOTE_HOST):$(REMOTE_DIR)"
+	@echo "  make sync REMOTE_HOST=user@host REMOTE_DIR=~/path  (override)"
 	@echo ""
 	@echo "  GENERATE DATA:"
 	@echo "  make generate            Full pipeline (all 4 stages)"
@@ -58,12 +69,26 @@ venv:
 	@echo "  Virtual env ready. You can now run: make generate"
 	@echo "  (The Makefile uses .venv automatically — no need to activate it.)"
 
+sync:
+	@echo "Syncing to $(REMOTE_HOST):$(REMOTE_DIR) ..."
+	rsync -avz --exclude='.git' --exclude='.venv' --exclude='data/' \
+		-e "ssh -i $(SSH_KEY) -p $(SSH_PORT)" \
+		./ $(REMOTE_HOST):$(REMOTE_DIR)
+	@echo "Done. Run 'make generate' on $(REMOTE_HOST)."
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline targets
 # ─────────────────────────────────────────────────────────────────────────────
 
 generate:
 	$(PYTHON) datagen/pipeline.py --config $(CONFIG)
+
+generate-bg:
+	@LOG=generate_$$(date +%Y%m%d_%H%M%S).log; \
+	nohup make generate CONFIG=$(CONFIG) > $$LOG 2>&1 & \
+	echo "Pipeline running in background (PID $$!)"; \
+	echo "Log: $$LOG"; \
+	echo "Watch: tail -f $$LOG"
 
 sample:
 	$(PYTHON) datagen/pipeline.py --config $(CONFIG) \
@@ -85,6 +110,33 @@ skip-simulate:
 
 skip-sample:
 	$(PYTHON) datagen/pipeline.py --config $(CONFIG) --skip-sample
+
+# Re-generate angles.txt then run only EMEBSD (reuses existing MC+master output)
+resample:
+	$(PYTHON) -c "\
+import yaml, sys; sys.path.insert(0, '.'); \
+from datagen import sampler; \
+cfg = yaml.safe_load(open('$(CONFIG)')); \
+sampler.run_from_config(cfg)"
+
+ebsd:
+	@DATA_DIR=$$($(PYTHON) -c "import yaml,os; cfg=yaml.safe_load(open('$(CONFIG)')); print(os.path.expanduser(cfg['paths']['data_dir']))"); \
+	EXP=$$($(PYTHON) -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); print(cfg['paths']['experiment_name'])"); \
+	IMAGE=$$($(PYTHON) -c "import yaml; cfg=yaml.safe_load(open('$(CONFIG)')); print(cfg['docker']['image'])"); \
+	GPU_FLAGS="--gpus all"; \
+	for dev in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm; do \
+		[ -e "$$dev" ] && GPU_FLAGS="$$GPU_FLAGS --device $$dev"; \
+	done; \
+	OPENCL_MOUNT=""; \
+	[ -d /etc/OpenCL/vendors ] && OPENCL_MOUNT="-v /etc/OpenCL/vendors:/etc/OpenCL/vendors:ro"; \
+	docker run --rm $$GPU_FLAGS $$OPENCL_MOUNT \
+		-v "$$DATA_DIR:/home/EMuser/EMPlay" \
+		"$$IMAGE" \
+		bash -c "set -e && \
+			XTAL_SRC=\$$(find /home/EMs/EMsoftData -name 'Ni.xtal' 2>/dev/null | head -1) && \
+			mkdir -p /tmp/XtalFolder && cp \"\$$XTAL_SRC\" /tmp/XtalFolder/Fe_FCC.xtal && \
+			python3 -c \"import json; cfg='/home/EMuser/.config/EMsoft/EMsoftConfig.json'; c=json.load(open(cfg)); c['EMXtalFolderpathname']='/tmp/XtalFolder'; json.dump(c,open(cfg,'w'),indent=4)\" && \
+			cd /home/EMuser/EMPlay && EMEBSD $$EXP/EMEBSD.nml"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Setup targets
@@ -116,7 +168,7 @@ setup-xtal:
 			"$$IMAGE" \
 			bash -c "set -e; \
 				SRC=\$$(find /home/EMs /root -name 'Ni.xtal' 2>/dev/null | head -1); \
-				if [ -z \"\$$SRC\" ]; then \
+				if [ -z \"\$$SRC\" ]; then \k
 					cd /tmp && git clone --depth 1 https://github.com/EMsoft-org/EMsoftData.git; \
 					SRC=/tmp/EMsoftData/Ni.xtal; \
 				fi; \

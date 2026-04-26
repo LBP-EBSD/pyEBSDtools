@@ -7,7 +7,7 @@ Reads:
   - <exp_dir>/<experiment_name>_euler.npy     — Euler angles saved by sampler
 
 Writes to processed_dir:
-  - X_patterns.npy     (N, H, W)  float32  — raw patterns
+  - X_patterns.npy     (N, 1, H, W)  float32  — raw patterns (channel-first)
   - y_strain.npy       (N, 6)     float64  — Voigt strain
   - y_quaternion.npy   (N, 4)     float64  — unit quaternions
   - y_euler.npy        (N, 3)     float64  — Euler angles in degrees
@@ -76,8 +76,9 @@ def convert(
         f"Quaternion normalisation failed: max dev = {np.abs(norms - 1.0).max():.2e}"
 
     # ── Write outputs ─────────────────────────────────────────────────────────
+    # Add channel dim: (N, H, W) → (N, 1, H, W) as expected by the ML pipeline
     outputs = {
-        "X_patterns.npy":   (patterns.astype(np.float32), "float32"),
+        "X_patterns.npy":   (patterns[:, np.newaxis].astype(np.float32), "float32"),
         "y_strain.npy":     (voigt_strain.astype(np.float64), "float64"),
         "y_quaternion.npy": (quaternions.astype(np.float64),  "float64"),
         "y_euler.npy":      (euler.astype(np.float64),        "float64"),

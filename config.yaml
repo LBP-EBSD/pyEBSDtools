@@ -10,8 +10,7 @@
 
 # ── Generation parameters ────────────────────────────────────────────────────
 generation:
-  n_patterns:       10            # total number of EBSD patterns to simulate
-                                  # use 10 for quick test, 10000+ for real training
+  n_patterns:       10000         # total number of EBSD patterns to simulate
   strain_type:      multiaxial    # uniform | uniaxial_x/y/z | biaxial_xy/yz/xz
                                   # multiaxial | shear_xy/xz/yz | random
   strain_magnitude: 0.02          # max |ε| (e.g. 0.02 = 2% strain)
@@ -40,13 +39,14 @@ emsoft:
   energy_max_keV:           25.0
 
   # Monte Carlo
-  n_mc_electrons:          50000000     # totnum_el — more = better MC statistics
-                                         # 50M = fast test; use 2000000000 for production
+  n_mc_electrons:          2000000000   # totnum_el — 2B for production quality
   mc_grid_size:            501          # numsx in EMMCOpenCL.nml (use 801 for production)
 
   # Compute
-  n_threads:               4
-  use_gpu:                 true         # true → EMEBSDmasterOpenCL; false → CPU
+  n_threads:               16           # CPU master uses this many threads — raise for kratos
+  use_gpu:                 true         # true → EMEBSDmasterOpenCL (GPU, fast)
+                                         # Pipeline auto-patches the HDF5 group name so
+                                         # EMEBSD can read GPU-master output correctly.
 
 
 # ── Docker ───────────────────────────────────────────────────────────────────
@@ -74,4 +74,4 @@ paths:
   processed_dir: data/processed        # final .npy files consumed by training
 
   # Unique name for this experiment run (used for subdirectory + file names)
-  experiment_name: Fe_FCC_test_10
+  experiment_name: Fe_FCC_10000

@@ -136,7 +136,7 @@ def print_summary(processed_dir: str) -> None:
 
     print(f"  N patterns    : {result.get('n_patterns', '?'):,}")
     if "pattern_shape" in result:
-        h, w = result["pattern_shape"]
+        *_, h, w = result["pattern_shape"]   # works for (H,W) or (C,H,W)
         print(f"  Pattern size  : {h} × {w}  px")
     if "intensity_range" in result:
         lo, hi = result["intensity_range"]
