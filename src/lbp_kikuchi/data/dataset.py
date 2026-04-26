@@ -44,7 +44,10 @@ class EBSDDataset(Dataset):
         self.norm_method = norm_method
 
         X_norm = apply_norm(X.astype(np.float32), stats, norm_method)
-        self.X = torch.from_numpy(X_norm[:, None])  # (N, 1, H, W)
+        # Accept both (N, H, W) and (N, 1, H, W) — add channel dim only if needed.
+        if X_norm.ndim == 3:
+            X_norm = X_norm[:, None]
+        self.X = torch.from_numpy(X_norm)  # (N, 1, H, W)
         self.targets = {k: torch.from_numpy(v.astype(np.float32)) for k, v in targets.items()}
 
     def __len__(self) -> int:
