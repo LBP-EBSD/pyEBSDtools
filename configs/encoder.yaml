@@ -2,7 +2,7 @@ experiment_name: "phase1_strain"
 seed: 42
 
 training:
-  epochs: 50
+  epochs: 5
   batch_size: 32
   lr: 1.0e-3
   val_split: 0.2
@@ -15,7 +15,7 @@ model:
   feature_dim: 128
 
 data:
-  path: "data/processed/"
+  path: "data/"
   patterns_file: "X_patterns.npy"
   strain_file: "y_strain.npy"
   orientation_file: "y_quaternion.npy"  # only loaded if predict_orientation=true

@@ -14,11 +14,13 @@ Outputs (Hydra-managed, in outputs/YYYY-MM-DD/HH-MM-SS/):
 """
 
 import hydra
+import json
 import numpy as np
 import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 
 from lbp_kikuchi.data.dataset import EBSDDataset, compute_norm_stats
@@ -39,6 +41,7 @@ def main(cfg: DictConfig) -> None:
 
     logger = Logger(run_dir)
     logger.log_config(cfg_to_dict(cfg))
+    writer = SummaryWriter(log_dir=run_dir / "tensorboard")
 
     # ── Data ──────────────────────────────────────────────────────────────────
     data_path = Path(cfg.data.path).resolve()
@@ -55,6 +58,11 @@ def main(cfg: DictConfig) -> None:
 
     # Stats computed on train split only — applying train stats to val prevents leakage.
     train_stats = compute_norm_stats(X[train_idx], cfg.training.norm_method)
+
+    # Persist norm stats so inference can reproduce identical normalisation.
+    norm_stats_payload = {"norm_method": cfg.training.norm_method, **train_stats}
+    with open(run_dir / "checkpoints" / "norm_stats.json", "w") as f:
+        json.dump(norm_stats_payload, f, indent=2)
 
     def make_ds(split_idx):
         return EBSDDataset(
@@ -94,20 +102,35 @@ def main(cfg: DictConfig) -> None:
             orientation_loss_weight=cfg.training.orientation_loss_weight,
         )
 
+        lr = optimizer.param_groups[0]["lr"]
         log = {
             "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
+            "lr": lr,
             **{f"train_{k}": v for k, v in train_metrics.items()},
             **{f"val_{k}": v for k, v in val_metrics.items()},
         }
         print(log)
         logger.log(log)
+
+        # ── TensorBoard ───────────────────────────────────────────────────
+        writer.add_scalar("Loss/train", train_metrics["loss"], epoch)
+        writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
+        writer.add_scalar("StrainMAE/train", train_metrics["strain_mae"], epoch)
+        writer.add_scalar("StrainMAE/val", val_metrics["strain_mae"], epoch)
+        writer.add_scalar("StrainRMSE/train", train_metrics["strain_rmse"], epoch)
+        writer.add_scalar("StrainRMSE/val", val_metrics["strain_rmse"], epoch)
+        writer.add_scalar("LR", lr, epoch)
+        for comp in ["e11", "e22", "e33", "e23", "e13", "e12"]:
+            writer.add_scalar(f"PerComponentMAE_val/{comp}", val_metrics[f"mae_{comp}"], epoch)
+
         scheduler.step()
 
         torch.save(model.state_dict(), run_dir / "checkpoints" / "last.pt")
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             torch.save(model.state_dict(), run_dir / "checkpoints" / "best.pt")
+
+    writer.close()
 
 
 if __name__ == "__main__":

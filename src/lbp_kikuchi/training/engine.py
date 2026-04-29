@@ -4,7 +4,7 @@ from lbp_kikuchi.training.metrics import compute_all_metrics
 
 
 def _to_device(targets: dict, device: torch.device) -> dict:
-    return {k: v.to(device) for k, v in targets.items()}
+    return {k: v.to(device, non_blocking=True) for k, v in targets.items()}
 
 
 def _cat_dicts(list_of_dicts: list[dict]) -> dict:
@@ -23,8 +23,8 @@ def train_one_epoch(
     all_preds, all_targets = [], []
 
     for X, targets in loader:
-        X = X.to(device)
-        targets = _to_device(targets, device)
+        X = X.to(device, non_blocking=True)
+        targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
 
         outputs = model(X)
         loss = combined_loss(outputs, targets, orientation_loss_weight)

@@ -8,16 +8,22 @@ class StrainHead(nn.Module):
 
     Voigt order: [ε11, ε22, ε33, ε23, ε13, ε12]
 
+    Architecture: in_dim → hidden_dim → hidden_dim//2 → 6
+    Dropout after the first activation reduces overfitting on small datasets.
+
     Input:  (B, in_dim)
     Output: (B, 6)
     """
 
-    def __init__(self, in_dim: int = 128, hidden_dim: int = 64):
+    def __init__(self, in_dim: int = 128, hidden_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 6),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 6),
         )
 
     def forward(self, x):
