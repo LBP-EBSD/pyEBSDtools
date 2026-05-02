@@ -1,9 +1,12 @@
-# Python cache
+# Python cache / bytecode
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
+.Python
 
-# Build
+# Packaging / build
 *.egg-info/
 .eggs/
 dist/
@@ -11,20 +14,21 @@ build/
 *.egg
 pip-wheel-metadata/
 
-# Envs
+# Environments
 venv/
 .venv/
 env/
 ENV/
 .env
-
-# Env files
 .env.*
 !.env.example
 
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
@@ -40,26 +44,30 @@ Thumbs.db
 # Logs
 *.log
 
-#external data
+# Generated data / outputs
 data/
-#outputs
 outputs/
 
-# PyTorch checkpoints
+# PyTorch / checkpoints
 *.pt
 *.pth
+*.ckpt
 
-# Large data files — never commit regardless of location
+# Large binary / arrays
 *.h5
 *.hdf5
 *.npy
 *.npz
 
-# Hydra multirun sweeps
+# Hydra (training sweeps / typo variant)
 multirun/
+hydralance/
 
 # Jupyter
 .ipynb_checkpoints/
 
-#hydra
-hydralance/
+# Training metrics — keep small repo config files
+*.csv
+*.json
+!config.yaml
+!pyproject.toml
