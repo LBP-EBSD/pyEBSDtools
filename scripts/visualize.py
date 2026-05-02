@@ -17,10 +17,16 @@ Usage:
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+
+# Force local src imports.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from lbp_kikuchi.data.loader import EBSDDataLoader
 

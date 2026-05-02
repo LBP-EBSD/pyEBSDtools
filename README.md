@@ -55,74 +55,97 @@ For **joint prediction** (predict both orientation AND strain):
 
 ## Scripts
 
-### 1. `load_data.py` — Load EBSD Data
+### 1. `scripts/prepare_numpy.py` — HDF5 → NumPy arrays
 
-```python
-from load_data import EBSDDataLoader
-
-# Load from HDF5 file
-loader = EBSDDataLoader('/path/to/Fe_EBSD_patterns.h5')
-print(loader)  # prints summary
-
-# Get raw data
-X = loader.get_patterns()          # (N, 480, 640) images
-y = loader.get_euler()             # (N, 3) Euler angles in degrees
-q = loader.get_quaternions()       # (N, 4) quaternions
-eps = loader.get_voigt_strain()   # (N, 6) Voigt strain or None
-
-# Normalize patterns
-X_norm = loader.get_normalized('minmax')   # 0-1 range
-X_norm = loader.get_normalized('zscore')   # zero mean, unit variance
-
-# Flatten for classic ML
-X_flat = loader.get_flattened()           # (N, 307200)
-
-# Dump to .npy files for easy loading
-loader.to_numpy('/output/dir/')
-# Creates: X_patterns.npy, y_euler.npy, y_quaternion.npy, y_strain.npy
-
-# TensorFlow dataset
-ds = loader.to_tensorflow_dataset(batch_size=32)
-```
-
-**As a script** (inspect file structure):
-```bash
-python load_data.py /path/to/data.h5 --info       # show HDF5 tree
-python load_data.py /path/to/data.h5 --dump ./out/  # dump as .npy files
-```
-
-### 2. `visualize.py` — Visualize Patterns
+Converts an EMsoft HDF5 file into `.npy` arrays used by training/inference.
 
 ```bash
-# Run all visualizations (default)
-python visualize.py /path/to/data.h5
+python scripts/prepare_numpy.py --h5 /path/to/data.h5 --out data/
+```
+
+Creates:
+- `X_patterns.npy`
+- `y_euler.npy`
+- `y_quaternion.npy`
+- `y_strain.npy` (if strain exists in source)
+
+### 2. `scripts/visualize.py` — Pattern visualization
+
+```bash
+# Run default set of plots
+python scripts/visualize.py /path/to/data.h5
 
 # Specific views
-python visualize.py /path/to/data.h5 --grid              # grid of all patterns
-python visualize.py /path/to/data.h5 --single 1           # pattern #1 with profiles
-python visualize.py /path/to/data.h5 --compare 1 2       # compare patterns #1 and #2
-python visualize.py /path/to/data.h5 --heatmap           # mean/std sensitivity map
-python visualize.py /path/to/data.h5 --histogram         # intensity histogram
-python visualize.py /path/to/data.h5 --export-tiff        # export as TIFF images
-python visualize.py /path/to/data.h5 --export-png         # export as PNG images
-python visualize.py /path/to/data.h5 --all                # all of the above
-
-# Save to specific output directory
-python visualize.py /path/to/data.h5 -o ./my_output/
+python scripts/visualize.py /path/to/data.h5 --grid
+python scripts/visualize.py /path/to/data.h5 --single 1
+python scripts/visualize.py /path/to/data.h5 --compare 1 2
+python scripts/visualize.py /path/to/data.h5 --heatmap
+python scripts/visualize.py /path/to/data.h5 --histogram
+python scripts/visualize.py /path/to/data.h5 --export-tiff
+python scripts/visualize.py /path/to/data.h5 --export-png
 ```
 
-**As a library** (in Jupyter or code):
-```python
-from visualize import plot_grid, plot_single_with_profiles, plot_pattern_difference
-from load_data import EBSDDataLoader
+### 3. `scripts/train_encoder.py` — Train (Hydra)
 
-loader = EBSDDataLoader('/path/to/data.h5')
-plot_grid(loader, output_path='grid.png')
-plot_single_with_profiles(loader, idx=0, output_path='profile.png')
-plot_pattern_difference(loader, idx1=0, idx2=1, output_path='diff.png')
+```bash
+python scripts/train_encoder.py
+python scripts/train_encoder.py training.epochs=100 training.lr=5e-4
+python scripts/train_encoder.py data.path=data/overfit64 training.test_split=0.0
 ```
 
-### 3. `generate_angles.py` — Generate Orientations & Strains
+Important behavior:
+- Uses `train/val/test` split from config (`training.val_split`, `training.test_split`)
+- Computes normalisation stats from **train split only**
+- Saves:
+  - `checkpoints/norm_stats.json`
+  - `checkpoints/split_indices.json`
+  - `checkpoints/best.pt`, `checkpoints/last.pt`
+
+### 4. `scripts/infer_eval.py` — Split-aware evaluation
+
+Defaults:
+- latest run under `outputs/`
+- `--split val`
+
+```bash
+python scripts/infer_eval.py
+python scripts/infer_eval.py --run-dir outputs/2026-04-29/14-00-58 --split val
+python scripts/infer_eval.py --split train
+python scripts/infer_eval.py --split test
+python scripts/infer_eval.py --split all
+```
+
+Flags:
+- `--run-dir`
+- `--split` (`train|val|test|all`)
+- `--data-dir` (default: from run config)
+- `--checkpoint` (`best.pt|last.pt`)
+- `--batch-size`
+- `--max-samples`
+- `--spot-checks`
+- `--no-plot`
+
+Outputs:
+- `eval_scatter_<split>.png`
+- `eval_results_<split>.json`
+
+### 5. `scripts/infer.py` — Single-sample inference
+
+```bash
+python scripts/infer.py
+python scripts/infer.py --index 12
+python scripts/infer.py --run-dir outputs/2026-04-29/14-00-58 --save-plot pred.png
+```
+
+Flags:
+- `--run-dir`
+- `--data-dir` (default: from run config)
+- `--patterns-file`
+- `--index`
+- `--checkpoint`
+- `--save-plot`
+
+### 6. `scripts/generate_angles.py` — Generate orientations & strains
 
 This generates the input file for EMsoft's `EMEBSD` pattern generator. Run this
 **inside the Docker container** after installing Python packages, or run on the host
@@ -157,48 +180,33 @@ python generate_angles.py -n 10000 --strain-type random -s 0.015 --seed 42
 
 ---
 
-## Quick Start for Your Teammates
+## Quick Start
 
-### Step 1: View Existing Data
+### Step 1: Convert raw HDF5 data
 
 ```bash
 pip install -r requirements.txt
-python visualize.py ~/EMsoftData/Fe_FCC_exp/Fe_EBSD_patterns.h5
+python scripts/prepare_numpy.py --h5 ~/EMsoftData/Fe_FCC_exp/Fe_EBSD_patterns.h5 --out data/
 ```
 
-This opens:
-- A grid view of all patterns
-- Intensity profile plots
-- Mean/std sensitivity heatmap
-
-### Step 2: Load Data for ML
-
-```python
-import numpy as np
-from load_data import EBSDDataLoader
-
-loader = EBSDDataLoader('~/EMsoftData/Fe_FCC_exp/Fe_EBSD_patterns.h5')
-
-X = loader.get_patterns()          # images: (N, 480, 640)
-X_norm = loader.get_normalized()    # normalized: (N, 480, 640)
-y_euler = loader.get_euler()      # orientation: (N, 3)
-y_quat  = loader.get_quaternions() # quaternion: (N, 4)
-y_strain = loader.get_voigt_strain() # strain: (N, 6) or None
-
-# Ready for PyTorch/TensorFlow:
-# X_norm shape: (N, 1, 480, 640)  ← add channel dim for CNN
-X_cnn = X_norm[:, np.newaxis, :, :]   # (N, 1, 480, 640)
-```
-
-### Step 3: Generate More Data
+### Step 2: (Optional) Visualize patterns
 
 ```bash
-# Inside Docker container (after pip install):
-python generate_angles.py -n 10000 -s 0.02 --strain-type multiaxial --seed 42
+python scripts/visualize.py ~/EMsoftData/Fe_FCC_exp/Fe_EBSD_patterns.h5 --grid --heatmap
+```
 
-# This creates: Fe_FCC_exp/010000_strain_multiaxial.txt
-# Then re-run EMEBSD to generate the patterns:
-EMEBSD /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSD.nml
+### Step 3: Train
+
+```python
+python scripts/train_encoder.py
+```
+
+### Step 4: Evaluate held-out split
+
+```bash
+python scripts/infer_eval.py --split val
+# Optional:
+python scripts/infer_eval.py --split train
 ```
 
 ---

@@ -2,17 +2,24 @@ experiment_name: "phase1_strain"
 seed: 42
 
 training:
-  epochs: 5
+  epochs: 50
   batch_size: 32
   lr: 1.0e-3
-  val_split: 0.2
+  val_split: 0.15   # fraction of data held out for validation
+  test_split: 0.05  # fraction held out for final test (set 0.0 to skip)
   norm_method: "minmax"
   num_workers: 4
-  predict_orientation: false
+  predict_orientation: true
   orientation_loss_weight: 1.0
+  # Strain regression loss — one of: huber | mae | mse
+  # Huber (smooth-L1) is recommended: avoids MSE mean-collapse, robust to outliers.
+  loss_fn: "huber"
+  huber_delta: 0.5   # transition point; only used when loss_fn=huber
 
 model:
-  feature_dim: 128
+  # Encoder output / shared embedding size.
+  # ResNet18 backbone has 512-d features before the projection; 256 is a good default.
+  feature_dim: 256
 
 data:
   path: "data/"

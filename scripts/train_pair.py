@@ -1,31 +1,46 @@
 """
-Phase 1 training: single Kikuchi pattern → strain (+ optional orientation).
+Stage 3 training: pair of 3×3 pattern grids → Δε (relative strain).
+
+For each pair of adjacent scan points A and B, the model predicts:
+    Δε = ε_B − ε_A
+
+This is the physically meaningful learning target: strain is encoded as
+relative pattern distortion between points, not absolute appearance.
+The subtraction in PairModel (F_B − F_A) cancels shared bias and isolates
+the deformation signal.
+
+To reconstruct the absolute strain field from Δε predictions, accumulate
+predictions along the scan grid (cumulative sum or least-squares integration).
+
+Pair directions collected:
+    horizontal  A=(r,c) → B=(r,c+1)
+    vertical    A=(r,c) → B=(r+1,c)
+Both directions give the model all finite-difference information needed to
+reconstruct a 2D strain map.
 
 Run from repo root:
-    python scripts/train_encoder.py
-    python scripts/train_encoder.py training.lr=5e-4 model.feature_dim=256
-    python scripts/train_encoder.py training.predict_orientation=true
-    python scripts/train_encoder.py data.path=data/overfit64 training.epochs=200
+    python scripts/train_pair.py
+    python scripts/train_pair.py data.grid_rows=100 data.grid_cols=100
+    python scripts/train_pair.py training.directions=[horizontal]
 
-Config overrides (Hydra syntax, no -- prefix):
-    training.epochs=100
-    training.batch_size=64
+Config overrides (Hydra syntax):
+    data.grid_rows=100
+    data.grid_cols=100
+    data.directions=[horizontal,vertical]
+    training.epochs=50
+    training.batch_size=8
     training.lr=5e-4
-    training.val_split=0.15
-    training.test_split=0.05      # set 0.0 to disable test split
-    training.norm_method=zscore   # or minmax
-    model.feature_dim=256
-    data.path=data/custom/
-    experiment_name=my_run
+    model.feature_dim=128
+    experiment_name=stage3_run1
 
 Outputs (under outputs/YYYY-MM-DD/HH-MM-SS/):
-    checkpoints/best.pt            lowest val loss checkpoint
-    checkpoints/last.pt            end-of-training checkpoint
-    checkpoints/norm_stats.json    input + target normalisation stats
-    checkpoints/split_indices.json train/val/test index arrays
-    config_snapshot.json           exact config used
-    metrics.csv / metrics.json     per-epoch metrics
-    tensorboard/                   TensorBoard event files
+    checkpoints/best.pt
+    checkpoints/last.pt
+    checkpoints/norm_stats.json
+    checkpoints/split_indices.json
+    config_snapshot.json
+    metrics.csv / metrics.json
+    tensorboard/
 """
 
 import json
@@ -36,33 +51,23 @@ import hydra
 import numpy as np
 import torch
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-# Always import from this repo's src/, not any other installed copy.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lbp_kikuchi.data.dataset import EBSDDataset, compute_norm_stats
-from lbp_kikuchi.models.single_model import SinglePatternModel
-from lbp_kikuchi.training.engine import train_one_epoch, evaluate
+from lbp_kikuchi.data.dataset import GridPairDataset, build_pair_samples, compute_norm_stats
+from lbp_kikuchi.models.pair_model import PairModel
+from lbp_kikuchi.training.engine import evaluate_pair, train_one_epoch_pair
 from lbp_kikuchi.utils.config import cfg_to_dict
 from lbp_kikuchi.utils.logger import Logger
 from lbp_kikuchi.utils.seed import seed_everything
 
 
 def make_splits(N: int, val_frac: float, test_frac: float, seed: int) -> tuple:
-    """
-    Randomly partition N indices into (train, val, test).
-
-    Order in the shuffled array: [test | val | train]
-    so train is the largest contiguous tail, which is stable under re-runs
-    with the same seed regardless of val/test fraction tweaks.
-
-    Returns three lists of int indices.
-    """
     g = torch.Generator()
     g.manual_seed(seed)
     idx = torch.randperm(N, generator=g).tolist()
@@ -82,7 +87,7 @@ def make_splits(N: int, val_frac: float, test_frac: float, seed: int) -> tuple:
     return train_idx, val_idx, test_idx
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="encoder")
+@hydra.main(version_base=None, config_path="../configs", config_name="pair")
 def main(cfg: DictConfig) -> None:
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,41 +104,52 @@ def main(cfg: DictConfig) -> None:
     X = np.load(data_path / cfg.data.patterns_file)
     y_strain = np.load(data_path / cfg.data.strain_file)
 
-    print(f"Loaded  X     : {X.shape}  dtype={X.dtype}")
-    print(f"Loaded  y     : {y_strain.shape}  dtype={y_strain.dtype}")
+    grid_rows = int(cfg.data.grid_rows)
+    grid_cols = int(cfg.data.grid_cols)
+    directions = tuple(OmegaConf.to_container(cfg.data.directions))
 
-    N = len(X)
+    print(f"Loaded  X       : {X.shape}  dtype={X.dtype}")
+    print(f"Loaded  y       : {y_strain.shape}  dtype={y_strain.dtype}")
+    print(f"Scan grid       : {grid_rows} × {grid_cols} = {grid_rows * grid_cols} points")
+    print(f"Pair directions : {directions}")
+
+    # Build pair samples — (grids_a, grids_b, delta_strain).
+    grids_a, grids_b, delta_strain = build_pair_samples(
+        X, y_strain, grid_rows, grid_cols, directions=directions
+    )
+    M = len(grids_a)
+    print(
+        f"Pair samples    : {M}  "
+        f"(Δε mean={delta_strain.mean(axis=0).round(6).tolist()}, "
+        f"std={delta_strain.std(axis=0).round(6).tolist()})"
+    )
+
     test_frac = float(getattr(cfg.training, "test_split", 0.0))
     train_idx, val_idx, test_idx = make_splits(
-        N, float(cfg.training.val_split), test_frac, cfg.seed
+        M, float(cfg.training.val_split), test_frac, cfg.seed
     )
-    print(
-        f"Split   train={len(train_idx)}  val={len(val_idx)}  test={len(test_idx)}"
-    )
+    print(f"Split   train={len(train_idx)}  val={len(val_idx)}  test={len(test_idx)}")
 
-    # Persist split indices so infer_eval.py can reproduce exact splits.
-    split_payload = {
-        "train_idx": train_idx,
-        "val_idx": val_idx,
-        "test_idx": test_idx,
-    }
     with open(run_dir / "checkpoints" / "split_indices.json", "w") as f:
-        json.dump(split_payload, f)
+        json.dump({"train_idx": train_idx, "val_idx": val_idx, "test_idx": test_idx}, f)
 
-    # ── Target normalisation (train split only — no leakage) ──────────────────
-    y_train = y_strain[train_idx]
-    y_mean = y_train.mean(axis=0)
-    y_std = y_train.std(axis=0) + 1e-8
-    y_strain_norm = (y_strain - y_mean) / y_std
-
-    targets: dict = {"strain": y_strain_norm}
-    if cfg.training.predict_orientation:
-        targets["orientation"] = np.load(data_path / cfg.data.orientation_file)
+    # ── Target normalisation (Δε, train split only) ────────────────────────────
+    dy_train = delta_strain[train_idx]
+    y_mean = dy_train.mean(axis=0)
+    y_std = dy_train.std(axis=0) + 1e-8
+    delta_strain_norm = (delta_strain - y_mean) / y_std
 
     # ── Input normalisation (train split only) ─────────────────────────────────
-    train_stats = compute_norm_stats(X[train_idx], cfg.training.norm_method)
+    # Stats computed over all patterns in training grids (both A and B).
+    flat_train = np.concatenate(
+        [
+            grids_a[train_idx].reshape(-1, *X.shape[1:]),
+            grids_b[train_idx].reshape(-1, *X.shape[1:]),
+        ],
+        axis=0,
+    )
+    train_stats = compute_norm_stats(flat_train, cfg.training.norm_method)
 
-    # Persist all normalisation stats for reproducible inference.
     norm_stats_payload = {
         "norm_method": cfg.training.norm_method,
         **train_stats,
@@ -145,9 +161,10 @@ def main(cfg: DictConfig) -> None:
 
     # ── Datasets & loaders ────────────────────────────────────────────────────
     def make_ds(split_idx):
-        return EBSDDataset(
-            X[split_idx],
-            {k: v[split_idx] for k, v in targets.items()},
+        return GridPairDataset(
+            grids_a[split_idx],
+            grids_b[split_idx],
+            {"strain": delta_strain_norm[split_idx]},
             stats=train_stats,
             norm_method=cfg.training.norm_method,
         )
@@ -161,10 +178,7 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = SinglePatternModel(
-        feature_dim=cfg.model.feature_dim,
-        predict_orientation=cfg.training.predict_orientation,
-    ).to(device)
+    model = PairModel(feature_dim=cfg.model.feature_dim).to(device)
 
     loss_fn = str(cfg.training.loss_fn)
     huber_delta = float(cfg.training.huber_delta)
@@ -174,7 +188,10 @@ def main(cfg: DictConfig) -> None:
             "loss_fn": loss_fn,
             "huber_delta": huber_delta,
             "feature_dim": cfg.model.feature_dim,
-            "predict_orientation": cfg.training.predict_orientation,
+            "grid_rows": grid_rows,
+            "grid_cols": grid_cols,
+            "directions": list(directions),
+            "n_pairs": M,
         },
     )
     print(
@@ -193,15 +210,13 @@ def main(cfg: DictConfig) -> None:
     best_val_loss = float("inf")
 
     for epoch in range(cfg.training.epochs):
-        train_metrics = train_one_epoch(
+        train_metrics = train_one_epoch_pair(
             model, train_loader, optimizer, device,
-            orientation_loss_weight=cfg.training.orientation_loss_weight,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
         )
-        val_metrics = evaluate(
+        val_metrics = evaluate_pair(
             model, val_loader, device,
-            orientation_loss_weight=cfg.training.orientation_loss_weight,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
         )
@@ -218,14 +233,14 @@ def main(cfg: DictConfig) -> None:
 
         writer.add_scalar("Loss/train", train_metrics["loss"], epoch)
         writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
-        writer.add_scalar("StrainMAE/train", train_metrics["strain_mae"], epoch)
-        writer.add_scalar("StrainMAE/val", val_metrics["strain_mae"], epoch)
-        writer.add_scalar("StrainRMSE/train", train_metrics["strain_rmse"], epoch)
-        writer.add_scalar("StrainRMSE/val", val_metrics["strain_rmse"], epoch)
+        writer.add_scalar("DeltaStrainMAE/train", train_metrics["strain_mae"], epoch)
+        writer.add_scalar("DeltaStrainMAE/val", val_metrics["strain_mae"], epoch)
+        writer.add_scalar("DeltaStrainRMSE/train", train_metrics["strain_rmse"], epoch)
+        writer.add_scalar("DeltaStrainRMSE/val", val_metrics["strain_rmse"], epoch)
         writer.add_scalar("LR", lr, epoch)
         for comp in ["e11", "e22", "e33", "e23", "e13", "e12"]:
             writer.add_scalar(
-                f"PerComponentMAE_val/{comp}", val_metrics[f"mae_{comp}"], epoch
+                f"PerComponentMAE_val/delta_{comp}", val_metrics[f"mae_{comp}"], epoch
             )
 
         scheduler.step()
