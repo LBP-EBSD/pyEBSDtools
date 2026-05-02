@@ -1,262 +1,107 @@
 """
 Orientation and strain sampler — Stage 1 of the data generation pipeline.
 
-Generates random Euler angles and deformation gradient tensors (F), writes:
+Delegates to ``datagen.angle_generation`` (``AngleStrainGenerator``,
+``SpatialFieldGenerator``) so the root ``generate_angles.py`` CLI and
+``make generate`` share one implementation.
+
+Writes:
   - <experiment_name>_angles.txt   — EMEBSD input file (orpcdef format)
   - <experiment_name>_Ftensors.npy — (N, 3, 3) F tensors saved as labels
   - <experiment_name>_euler.npy    — (N, 3) Euler angles saved as labels
 
-Saving F tensors and Euler angles separately is essential because EMsoft does
-NOT reliably write deformation tensors back into its output HDF5 file.
-
-Output .txt format (EMEBSD anglefiletype='orpcdef'):
-    Line 1: 'eu'
-    Line 2: N
-    Line 3+: euler1 euler2 euler3 xpc ypc F11 F21 F31 F12 F22 F32 F13 F23 F33
-              (F written in column-major order as expected by EMEBSD)
+EMsoft reads ``orpcdef`` with **no** comment line after N — each data line must
+be exactly 15 floats (euler ×3, xpc, ypc, L, F column-major ×9).
 """
 
+from __future__ import annotations
+
 import os
+
 import numpy as np
-from helpers.crystal import sample_random_orientations, ftensor_to_voigt
 
+from datagen.angle_generation import AngleStrainGenerator, SpatialFieldGenerator
 
-# ─── Supported strain types ───────────────────────────────────────────────────
-STRAIN_TYPES = [
-    "uniform",
-    "uniaxial_x", "uniaxial_y", "uniaxial_z",
-    "biaxial_xy", "biaxial_yz", "biaxial_xz",
-    "multiaxial",
-    "shear_xy", "shear_xz", "shear_yz",
-    "random",
-]
-
-
-class Sampler:
-    """
-    Samples random EBSD scan parameters: orientations + elastic strains.
-
-    Args:
-        n_patterns:       Number of patterns to generate.
-        strain_type:      One of STRAIN_TYPES.
-        strain_magnitude: Max |ε| for random strain generation (e.g. 0.02 = 2%).
-        seed:             Integer seed for reproducibility.
-        xpc:              Pattern center x offset in pixels (passed through to file).
-        ypc:              Pattern center y offset in pixels.
-    """
-
-    def __init__(
-        self,
-        n_patterns: int = 10_000,
-        strain_type: str = "multiaxial",
-        strain_magnitude: float = 0.02,
-        seed: int | None = None,
-        xpc: float = 0.0,
-        ypc: float = 0.0,
-        L: float = 15000.0,
-    ):
-        if strain_type not in STRAIN_TYPES:
-            raise ValueError(f"Unknown strain_type {strain_type!r}. Choose from: {STRAIN_TYPES}")
-
-        self.n_patterns = n_patterns
-        self.strain_type = strain_type
-        self.strain_magnitude = strain_magnitude
-        self.rng = np.random.default_rng(seed)
-        self.xpc = xpc
-        self.ypc = ypc
-        self.L = L  # camera-to-sample distance in µm — pcs[3] in orpcdef format
-
-    # ─── Public ───────────────────────────────────────────────────────────────
-
-    def generate(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Sample orientations and F tensors.
-
-        Returns:
-            euler:    (N, 3)    Euler angles in degrees [phi1, Phi, phi2].
-            F_tensors:(N, 3, 3) Deformation gradient tensors.
-        """
-        euler = sample_random_orientations(self.n_patterns, self.rng)
-        F_tensors = np.stack([
-            self._sample_F() for _ in range(self.n_patterns)
-        ])
-        return euler, F_tensors
-
-    def save(self, out_dir: str, experiment_name: str) -> dict[str, str]:
-        """
-        Generate, then write all output files to `out_dir`.
-
-        Returns:
-            dict of {role: absolute_path} for every file written.
-        """
-        os.makedirs(out_dir, exist_ok=True)
-        euler, F_tensors = self.generate()
-
-        angles_path  = os.path.join(out_dir, f"{experiment_name}_angles.txt")
-        ftensor_path = os.path.join(out_dir, f"{experiment_name}_Ftensors.npy")
-        euler_path   = os.path.join(out_dir, f"{experiment_name}_euler.npy")
-
-        self._write_orpcdef(euler, F_tensors, angles_path)
-        np.save(ftensor_path, F_tensors.astype(np.float64))
-        np.save(euler_path,   euler.astype(np.float64))
-
-        print(f"[sampler] Wrote {self.n_patterns:,} samples:")
-        print(f"  angles  → {angles_path}")
-        print(f"  F tensors → {ftensor_path}  shape={F_tensors.shape}")
-        print(f"  euler     → {euler_path}    shape={euler.shape}")
-
-        return {
-            "angles_txt":  angles_path,
-            "ftensors_npy": ftensor_path,
-            "euler_npy":    euler_path,
-        }
-
-    # ─── Strain generators ────────────────────────────────────────────────────
-
-    def _sample_F(self) -> np.ndarray:
-        """Sample one (3, 3) deformation tensor for the configured strain type."""
-        t = self.strain_type
-        mag = self.strain_magnitude
-
-        if t == "uniform":
-            return self._F_from_voigt(np.zeros(6))
-
-        if t == "uniaxial_x":
-            eps = np.zeros(6)
-            eps[0] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "uniaxial_y":
-            eps = np.zeros(6)
-            eps[1] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "uniaxial_z":
-            eps = np.zeros(6)
-            eps[2] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "biaxial_xy":
-            val = self.rng.uniform(-mag, mag)
-            eps = np.zeros(6); eps[0] = val; eps[1] = val
-            return self._F_from_voigt(eps)
-
-        if t == "biaxial_yz":
-            val = self.rng.uniform(-mag, mag)
-            eps = np.zeros(6); eps[1] = val; eps[2] = val
-            return self._F_from_voigt(eps)
-
-        if t == "biaxial_xz":
-            val = self.rng.uniform(-mag, mag)
-            eps = np.zeros(6); eps[0] = val; eps[2] = val
-            return self._F_from_voigt(eps)
-
-        if t == "shear_xy":
-            eps = np.zeros(6)
-            eps[5] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "shear_xz":
-            eps = np.zeros(6)
-            eps[4] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "shear_yz":
-            eps = np.zeros(6)
-            eps[3] = self.rng.uniform(-mag, mag)
-            return self._F_from_voigt(eps)
-
-        if t == "multiaxial":
-            eps = self.rng.uniform(-mag, mag, 6)
-            return self._F_from_voigt(eps)
-
-        if t == "random":
-            # Weighted mix: more multiaxial, some uniaxial/shear for variety
-            choice = self.rng.choice(
-                ["multiaxial", "uniaxial_x", "uniaxial_y", "uniaxial_z",
-                 "biaxial_xy", "shear_xy", "shear_xz"],
-                p=[0.40, 0.15, 0.10, 0.10, 0.10, 0.075, 0.075],
-            )
-            old_type = self.strain_type
-            self.strain_type = choice
-            F = self._sample_F()
-            self.strain_type = old_type
-            return F
-
-        return self._F_from_voigt(np.zeros(6))
-
-    @staticmethod
-    def _F_from_voigt(eps: np.ndarray) -> np.ndarray:
-        """Build F = I + ε from a Voigt vector (full engineering shear components)."""
-        F = np.eye(3, dtype=np.float64)
-        F[0, 0] += eps[0]
-        F[1, 1] += eps[1]
-        F[2, 2] += eps[2]
-        F[1, 2] += eps[3]; F[2, 1] += eps[3]
-        F[0, 2] += eps[4]; F[2, 0] += eps[4]
-        F[0, 1] += eps[5]; F[1, 0] += eps[5]
-        return F
-
-    # ─── File writer ──────────────────────────────────────────────────────────
-
-    def _write_orpcdef(
-        self,
-        euler: np.ndarray,
-        F_tensors: np.ndarray,
-        output_path: str,
-    ) -> None:
-        """
-        Write the EMEBSD orientation+deformation input file (anglefiletype='orpcdef').
-
-        Format per data line (column-major F):
-            euler1 euler2 euler3 xpc ypc F11 F21 F31 F12 F22 F32 F13 F23 F33
-        """
-        # orpcdef format (from EMsoft EBSDmod.f90 ebsdreadorpcdef):
-        #   line 1: angle type ('eu')
-        #   line 2: N (count)
-        #   lines 3..N+2: phi1 Phi phi2  xpc ypc L  F11 F21 F31 F12 F22 F32 F13 F23 F33
-        #                  (15 values; L = camera-to-sample distance in µm)
-        # No comment line — Fortran reads exactly 15 values per pattern with no skip.
-        lines = ["eu", str(self.n_patterns)]
-
-        for i in range(self.n_patterns):
-            e = euler[i]
-            F = F_tensors[i]
-            line = (
-                f"{e[0]:10.4f} {e[1]:10.4f} {e[2]:10.4f} "
-                f"{self.xpc:8.2f} {self.ypc:8.2f} {self.L:10.2f} "
-                # column-major F: col0, col1, col2
-                f"{F[0,0]:14.8f} {F[1,0]:14.8f} {F[2,0]:14.8f} "
-                f"{F[0,1]:14.8f} {F[1,1]:14.8f} {F[2,1]:14.8f} "
-                f"{F[0,2]:14.8f} {F[1,2]:14.8f} {F[2,2]:14.8f}"
-            )
-            lines.append(line)
-
-        with open(output_path, "w") as fh:
-            fh.write("\n".join(lines) + "\n")
-
-
-# ─── CLI convenience ──────────────────────────────────────────────────────────
 
 def run_from_config(cfg: dict) -> dict[str, str]:
     """
-    Run the sampler from a parsed config dict (as loaded from config.yaml).
+    Run Stage 1 from a parsed config dict (as loaded from config.yaml).
 
-    Returns paths dict from Sampler.save().
+    Returns paths dict for angles_txt, ftensors_npy, euler_npy.
     """
-    gen_cfg   = cfg["generation"]
+    gen_cfg = cfg["generation"]
     paths_cfg = cfg["paths"]
+    ems = cfg["emsoft"]
 
     data_dir = os.path.expanduser(paths_cfg["data_dir"])
-    exp_dir  = os.path.join(data_dir, paths_cfg["experiment_name"])
+    exp_dir = os.path.join(data_dir, paths_cfg["experiment_name"])
+    os.makedirs(exp_dir, exist_ok=True)
 
-    sampler = Sampler(
-        n_patterns       = gen_cfg["n_patterns"],
-        strain_type      = gen_cfg["strain_type"],
-        strain_magnitude = gen_cfg["strain_magnitude"],
-        seed             = gen_cfg.get("seed"),
-        xpc              = gen_cfg.get("xpc", 0.0),
-        ypc              = gen_cfg.get("ypc", 0.0),
-        L                = cfg["emsoft"].get("camera_distance_um", 15000.0),
-    )
-    return sampler.save(exp_dir, paths_cfg["experiment_name"])
+    exp_name = paths_cfg["experiment_name"]
+    angles_path = os.path.join(exp_dir, f"{exp_name}_angles.txt")
+    ftensor_path = os.path.join(exp_dir, f"{exp_name}_Ftensors.npy")
+    euler_path = os.path.join(exp_dir, f"{exp_name}_euler.npy")
+
+    L = float(ems.get("camera_distance_um", 15000.0))
+    xpc = float(gen_cfg.get("xpc", 0.0))
+    ypc = float(gen_cfg.get("ypc", 0.0))
+    seed = gen_cfg.get("seed")
+
+    spatial = bool(gen_cfg.get("spatial_field", False))
+
+    if spatial:
+        rows = int(gen_cfg["grid_rows"])
+        cols = int(gen_cfg["grid_cols"])
+        n_patterns = rows * cols
+
+        gen_sp = SpatialFieldGenerator(grid_rows=rows, grid_cols=cols, seed=seed)
+        orientations, F_tensors, _eps_field = gen_sp.generate(
+            field_type=gen_cfg.get("field_type", "combined"),
+            scale=float(gen_cfg.get("field_scale", 1.0)),
+            constant_orientation=bool(gen_cfg.get("constant_orientation", False)),
+            orientation_spread_deg=float(gen_cfg.get("orientation_spread", 1.0)),
+            noise_frac=float(gen_cfg.get("noise_frac", 0.05)),
+        )
+
+        writer = AngleStrainGenerator(n_patterns=n_patterns, seed=seed)
+        writer.set_pattern_center(xpc=xpc, ypc=ypc, L=L)
+        # EMsoft: no comment line inside orpcdef (Fortran reads N then N lines of 15 reals)
+        writer.write_orpcdef(orientations, F_tensors, angles_path, comment="")
+
+        print(f"[sampler] spatial_field: grid {rows}×{cols} = {n_patterns:,} patterns")
+    else:
+        n_patterns = int(gen_cfg["n_patterns"])
+        strain_type = gen_cfg["strain_type"]
+        strain_mag = float(gen_cfg["strain_magnitude"])
+        uniform_val = gen_cfg.get("uniform_strain")
+        if uniform_val is not None:
+            strain_type = "uniform"
+            uniform_val = float(uniform_val)
+        else:
+            uniform_val = 0.0
+
+        gen = AngleStrainGenerator(n_patterns=n_patterns, seed=seed)
+        gen.set_pattern_center(xpc=xpc, ypc=ypc, L=L)
+        gen.set_strain(strain_type, strain_mag, uniform_val)
+
+        orientations, F_tensors = gen.generate(
+            strain_type=strain_type,
+            strain_magnitude=strain_mag,
+            uniform_strain_value=uniform_val,
+        )
+        gen.summary()
+        gen.write_orpcdef(orientations, F_tensors, angles_path, comment="")
+
+    np.save(ftensor_path, np.asarray(F_tensors, dtype=np.float64))
+    np.save(euler_path, np.asarray(orientations, dtype=np.float64))
+
+    print(f"[sampler] Wrote {orientations.shape[0]:,} samples:")
+    print(f"  angles    → {angles_path}")
+    print(f"  F tensors → {ftensor_path}  shape={F_tensors.shape}")
+    print(f"  euler     → {euler_path}    shape={orientations.shape}")
+
+    return {
+        "angles_txt": angles_path,
+        "ftensors_npy": ftensor_path,
+        "euler_npy": euler_path,
+    }

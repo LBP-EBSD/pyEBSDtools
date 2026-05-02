@@ -4,7 +4,7 @@ Data generation pipeline — master orchestrator.
 
 Reads config.yaml and runs all four stages in sequence:
 
-    Stage 1 — Sample     datagen/sampler.py    orientations + F tensors
+    Stage 1 — Sample     datagen/sampler.py    → datagen/angle_generation.py
     Stage 2 — Simulate   datagen/emsoft.py     EMsoft inside Docker → .h5
     Stage 3 — Convert    datagen/convert.py    .h5 + labels → .npy
     Stage 4 — Validate   helpers/validate.py   sanity checks
@@ -52,6 +52,14 @@ def _validate_config(cfg: dict) -> None:
     for key in required_paths:
         if key not in cfg["paths"]:
             raise ValueError(f"config.yaml paths.{key} is required")
+
+    gen = cfg["generation"]
+    if gen.get("spatial_field"):
+        for key in ("grid_rows", "grid_cols"):
+            if key not in gen:
+                raise ValueError(
+                    f"config.yaml generation.{key} is required when generation.spatial_field is true"
+                )
 
 
 def run_pipeline(

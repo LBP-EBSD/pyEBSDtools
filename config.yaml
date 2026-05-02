@@ -10,13 +10,26 @@
 
 # ── Generation parameters ────────────────────────────────────────────────────
 generation:
-  n_patterns:       10000         # total number of EBSD patterns to simulate
+  # Stage 1 uses datagen/angle_generation.py (AngleStrainGenerator / SpatialFieldGenerator).
+  n_patterns:       10000         # total patterns (ignored if spatial_field: true)
   strain_type:      multiaxial    # uniform | uniaxial_x/y/z | biaxial_xy/yz/xz
-                                  # multiaxial | shear_xy/xz/yz | random
+                                  # multiaxial | shear_xy/xz/yz | random | none
   strain_magnitude: 0.02          # max |ε| (e.g. 0.02 = 2% strain)
   seed:             42            # integer seed for reproducibility (null = random)
   xpc:              0.0           # pattern centre x offset in pixels
   ypc:              0.0           # pattern centre y offset in pixels
+  # uniform_strain: 0.005        # optional: fixed hydrostatic strain (forces strain_type uniform)
+
+  # Spatially correlated strain (same as: python generate_angles.py --spatial-field …)
+  spatial_field:    false         # true → grid_rows × grid_cols patterns, field_type below
+  grid_rows:        100           # scan height (only if spatial_field)
+  grid_cols:        100           # scan width  (only if spatial_field)
+  field_type:       combined      # uniaxial_gradient | pure_bending | gaussian_inclusion |
+                                   # shear_gradient | biaxial_gradient | combined
+  field_scale:      1.0           # strain amplitude scale for spatial fields
+  constant_orientation: false     # false → slow orientation drift across scan
+  orientation_spread: 1.0         # degrees (when constant_orientation is false)
+  noise_frac:       0.05          # strain-field noise as fraction of peak amplitude
 
 
 # ── EMsoft simulation parameters ─────────────────────────────────────────────

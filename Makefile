@@ -1,6 +1,6 @@
 CONFIG ?= config.yaml
 # Use .venv if it exists (created by `make venv`), otherwise fall back to system python3
-PYTHON ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || (command -v python3 || command -v python))
+PYTHON ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || [ -f venv/bin/python ] && echo venv/bin/python || (command -v python3 || command -v python))
 
 # Remote sync target — override on command line if needed:
 #   make sync REMOTE_HOST=user@otherhost REMOTE_DIR=~/some/path
