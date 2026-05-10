@@ -10,14 +10,14 @@ Reads config.yaml and runs all four stages in sequence:
     Stage 4 — Validate   helpers/validate.py   sanity checks
 
 Usage:
-    python datagen/pipeline.py                       # uses config.yaml
-    python datagen/pipeline.py --config my.yaml
-    python datagen/pipeline.py --skip-simulate       # if .h5 already exists
-    python datagen/pipeline.py --validate-only       # re-validate existing output
+    python datagen/pipeline.py                              # uses datagen/configs/config.yaml
+    python datagen/pipeline.py --config datagen/configs/my.yaml
+    python datagen/pipeline.py --skip-simulate              # if .h5 already exists
+    python datagen/pipeline.py --validate-only              # re-validate existing output
 
 Run from repo root:
     make generate
-    make generate CONFIG=my_experiment.yaml
+    make generate CONFIG=datagen/configs/my_experiment.yaml
 """
 
 import argparse
@@ -88,6 +88,14 @@ def run_pipeline(
     _header("Data Generation Pipeline")
     _print_config_summary(cfg)
 
+    # ── Save config snapshot alongside the experiment data ────────────────────
+    if not validate_only:
+        os.makedirs(exp_dir, exist_ok=True)
+        snapshot_path = os.path.join(exp_dir, "config_snapshot.yaml")
+        with open(snapshot_path, "w") as fh:
+            yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
+        print(f"\n  Config snapshot → {snapshot_path}")
+
     # ── Stage 4 only ─────────────────────────────────────────────────────────
     if validate_only:
         _stage("4", "Validate")
@@ -108,6 +116,10 @@ def run_pipeline(
             "euler_npy":     os.path.join(exp_dir, f"{exp_name}_euler.npy"),
         }
         _check_files_exist(sampler_paths)
+        # Include positions file if it exists (spatial mode only).
+        pos_path = os.path.join(exp_dir, f"{exp_name}_positions.npy")
+        if os.path.exists(pos_path):
+            sampler_paths["positions_npy"] = pos_path
 
     # ── Stage 2: Simulate (EMsoft/Docker) ────────────────────────────────────
     if not skip_simulate:
@@ -162,9 +174,18 @@ def _stage(num: str, description: str) -> None:
 def _print_config_summary(cfg: dict) -> None:
     gen   = cfg["generation"]
     paths = cfg["paths"]
+    spatial = gen.get("spatial_field", False)
+    if spatial:
+        n_patterns = gen.get("grid_rows", "?") * gen.get("grid_cols", "?")
+        mode_line = (f"  Mode        : spatial  {gen.get('grid_rows')}×{gen.get('grid_cols')}"
+                     f"  field={gen.get('field_type', 'combined')}")
+    else:
+        n_patterns = gen.get("n_patterns", "?")
+        mode_line = (f"  Strain type : {gen.get('strain_type', 'uniform')}"
+                     f"  (mag={gen.get('strain_magnitude', 0.0)})")
     print(f"\n  Experiment  : {paths['experiment_name']}")
-    print(f"  N patterns  : {gen['n_patterns']:,}")
-    print(f"  Strain type : {gen['strain_type']}  (mag={gen['strain_magnitude']})")
+    print(f"  N patterns  : {n_patterns:,}" if isinstance(n_patterns, int) else f"  N patterns  : {n_patterns}")
+    print(mode_line)
     print(f"  Seed        : {gen.get('seed', 'None')}")
     print(f"  Docker image: {cfg['docker']['image']}")
     print(f"  Raw out     : {paths['data_dir']}/{paths['experiment_name']}")
@@ -188,7 +209,7 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--config", default="config.yaml",
+        "--config", default="datagen/configs/config.yaml",
         help="Path to config.yaml (default: config.yaml)",
     )
     parser.add_argument(

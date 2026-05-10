@@ -71,3 +71,189 @@ def combined_loss(
         )
 
     return loss
+
+
+# ---------------------------------------------------------------------------
+# Saint-Venant / physical-compatibility losses for Stage 3 (pair model)
+# ---------------------------------------------------------------------------
+
+def physical_bounds_loss(
+    delta_pred: torch.Tensor,
+    max_abs_strain: float = 0.05,
+) -> torch.Tensor:
+    """
+    Penalise predicted Δε components that exceed physically plausible bounds.
+
+    For elastic deformation of common structural metals the total strain rarely
+    exceeds ~2–3 % (0.02–0.03) and the *change* between adjacent scan points
+    is even smaller (<<1 %). Any individual Voigt component of Δε that exceeds
+    ``max_abs_strain`` is penalised quadratically.
+
+    This acts as a soft constraint that stops the network from cheating its way
+    to low MSE by predicting large-magnitude spurious values.
+
+    Args:
+        delta_pred:     (B, 6) predicted Δε.
+        max_abs_strain: Soft threshold in absolute strain units. Default 0.05
+                        (5%), which is already beyond the elastic limit for
+                        most metals but gives the network some headroom.
+
+    Returns:
+        Scalar mean penalty ≥ 0.
+    """
+    excess = F.relu(delta_pred.abs() - max_abs_strain)
+    return (excess ** 2).mean()
+
+
+def loop_consistency_loss(
+    delta_pred: torch.Tensor,
+    pos_a: torch.Tensor,
+    pos_b: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Saint-Venant integrability (loop-consistency) loss for pairwise Δε predictions.
+
+    A strain field ε(r, c) is compatible (satisfies Saint-Venant conditions)
+    if and only if it is derivable from a continuous displacement field u(x).
+    In the discrete pairwise setting this translates to *path independence*:
+    the accumulated Δε along any closed loop must be zero.
+
+    For the simplest rectangular loop on the scan grid:
+
+        (r, c) ──h──► (r, c+1)
+          │                │
+          v                v
+        (r+1,c) ──h──► (r+1,c+1)
+
+    The integrability condition is:
+
+        Δε_h(r,c→r,c+1) + Δε_v(r,c+1→r+1,c+1)
+        − Δε_h(r+1,c→r+1,c+1) − Δε_v(r,c→r+1,c)  =  0      [per component]
+
+    This function finds all *complete* rectangles whose four constitutent pairs
+    happen to be present in the current batch, then penalises their residuals.
+
+    Horizontal pairs are detected by  pos_b[i] = pos_a[i] + [0, 1].
+    Vertical   pairs are detected by  pos_b[i] = pos_a[i] + [1, 0].
+
+    When position is unknown (pos_a == -1, i.e. the fallback from
+    GridPairDataset when positions were not stored), the function returns 0.
+
+    Args:
+        delta_pred: (B, 6) predicted Δε values (normalised or raw).
+        pos_a:      (B, 2) int tensor — scan position [row, col] of grid A center.
+        pos_b:      (B, 2) int tensor — scan position [row, col] of grid B center.
+
+    Returns:
+        Scalar mean squared loop residual ≥ 0 (0 when no loops are found).
+    """
+    if pos_a[0, 0].item() == -1:
+        return delta_pred.new_tensor(0.0)
+
+    diff = pos_b - pos_a   # (B, 2)
+
+    # Separate horizontal (Δcol=+1) and vertical (Δrow=+1) pairs.
+    h_mask = (diff[:, 0] == 0) & (diff[:, 1] == 1)
+    v_mask = (diff[:, 0] == 1) & (diff[:, 1] == 0)
+
+    h_idx = h_mask.nonzero(as_tuple=True)[0]
+    v_idx = v_mask.nonzero(as_tuple=True)[0]
+
+    if h_idx.numel() == 0 or v_idx.numel() == 0:
+        return delta_pred.new_tensor(0.0)
+
+    # Build lookup dictionaries: (r,c) → batch index, for each direction.
+    # We use integer-encoded keys to avoid Python dict overhead on GPU tensors.
+    # r * MAX_COLS + c — 10 000 cols is more than enough for any EBSD scan.
+    MAX_COLS = 10_000
+    h_keys = pos_a[h_idx, 0] * MAX_COLS + pos_a[h_idx, 1]  # (H_cnt,) key = (r,c) of A
+    v_keys = pos_a[v_idx, 0] * MAX_COLS + pos_a[v_idx, 1]  # (V_cnt,) key = (r,c) of A
+
+    # For a rectangle rooted at (r,c) we need:
+    #   h_bot : horizontal pair (r,   c)   → (r,   c+1)   key = r*MC + c
+    #   h_top : horizontal pair (r+1, c)   → (r+1, c+1)   key = (r+1)*MC + c
+    #   v_left: vertical   pair (r,   c)   → (r+1, c)     key = r*MC + c
+    #   v_rgt : vertical   pair (r,   c+1) → (r+1, c+1)   key = r*MC + (c+1)
+    # Root key for h_bot and v_left is the same: r*MC+c.
+
+    # Build Python dicts from tensors (done on CPU for indexing convenience;
+    # tensor ops for matching are GPU-friendly if the dicts are small).
+    h_dict = {int(k.item()): int(bi.item())
+              for k, bi in zip(h_keys, h_idx)}
+    v_dict = {int(k.item()): int(bi.item())
+              for k, bi in zip(v_keys, v_idx)}
+
+    residuals = []
+    for key, bot_h_bi in h_dict.items():
+        r = key // MAX_COLS
+        c = key % MAX_COLS
+        top_h_key = (r + 1) * MAX_COLS + c
+        v_l_key   = r * MAX_COLS + c
+        v_r_key   = r * MAX_COLS + (c + 1)
+
+        if top_h_key not in h_dict or v_l_key not in v_dict or v_r_key not in v_dict:
+            continue
+
+        dh_bot = delta_pred[bot_h_bi]                # Δε_h(r,   c→c+1)
+        dh_top = delta_pred[h_dict[top_h_key]]        # Δε_h(r+1, c→c+1)
+        dv_l   = delta_pred[v_dict[v_l_key]]          # Δε_v(r,   c→r+1)
+        dv_r   = delta_pred[v_dict[v_r_key]]          # Δε_v(r,   c+1→r+1)
+
+        # Loop residual: go right-then-down minus down-then-right.
+        # Both paths start at (r,c) and end at (r+1,c+1).
+        residual = dh_bot + dv_r - dh_top - dv_l     # (6,)
+        residuals.append((residual ** 2).sum())
+
+    if not residuals:
+        return delta_pred.new_tensor(0.0)
+
+    return torch.stack(residuals).mean()
+
+
+def pair_loss(
+    delta_pred: torch.Tensor,
+    delta_target: torch.Tensor,
+    pos_a: torch.Tensor,
+    pos_b: torch.Tensor,
+    loss_fn: str = "huber",
+    delta: float = 0.5,
+    sv_weight: float = 0.1,
+    bounds_weight: float = 0.01,
+    max_abs_strain: float = 0.05,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Full Stage-3 loss: regression + Saint-Venant integrability + physical bounds.
+
+    Total loss:
+        L = L_regression
+          + sv_weight     * L_loop_consistency   (Saint-Venant integrability)
+          + bounds_weight * L_physical_bounds    (per-component magnitude clamp)
+
+    Setting sv_weight=0 and bounds_weight=0 recovers the vanilla regression loss.
+
+    Args:
+        delta_pred:     (B, 6) predicted Δε.
+        delta_target:   (B, 6) ground-truth Δε.
+        pos_a, pos_b:   (B, 2) scan positions (int32).
+        loss_fn:        'huber', 'mae', or 'mse' for the regression term.
+        delta:          Huber δ.
+        sv_weight:      Weight of the Saint-Venant loop-consistency term.
+        bounds_weight:  Weight of the physical-bounds penalty.
+        max_abs_strain: Threshold for physical-bounds penalty (absolute units).
+
+    Returns:
+        (total_loss, components_dict) where components_dict contains
+        'loss_reg', 'loss_sv', 'loss_bounds' as scalar floats for logging.
+    """
+    loss_reg    = strain_loss(delta_pred, delta_target, loss_fn=loss_fn, delta=delta)
+    loss_sv     = loop_consistency_loss(delta_pred, pos_a, pos_b)
+    loss_bounds = physical_bounds_loss(delta_pred, max_abs_strain=max_abs_strain)
+
+    total = loss_reg + sv_weight * loss_sv + bounds_weight * loss_bounds
+
+    components = {
+        "loss_reg":    loss_reg.item(),
+        "loss_sv":     loss_sv.item(),
+        "loss_bounds": loss_bounds.item(),
+    }
+    return total, components

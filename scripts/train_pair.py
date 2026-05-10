@@ -59,7 +59,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lbp_kikuchi.data.dataset import GridPairDataset, build_pair_samples, compute_norm_stats
+from lbp_kikuchi.data.dataset import (
+    LazyGridPairDataset,
+    build_pair_index,
+    compute_norm_stats,
+)
 from lbp_kikuchi.models.pair_model import PairModel
 from lbp_kikuchi.training.engine import evaluate_pair, train_one_epoch_pair
 from lbp_kikuchi.utils.config import cfg_to_dict
@@ -91,6 +95,8 @@ def make_splits(N: int, val_frac: float, test_frac: float, seed: int) -> tuple:
 def main(cfg: DictConfig) -> None:
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device          : {device}"
+          + (f"  [{torch.cuda.get_device_name(0)}]" if device.type == "cuda" else ""))
 
     run_dir = Path(HydraConfig.get().runtime.output_dir)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
@@ -113,11 +119,15 @@ def main(cfg: DictConfig) -> None:
     print(f"Scan grid       : {grid_rows} × {grid_cols} = {grid_rows * grid_cols} points")
     print(f"Pair directions : {directions}")
 
-    # Build pair samples — (grids_a, grids_b, delta_strain).
-    grids_a, grids_b, delta_strain = build_pair_samples(
-        X, y_strain, grid_rows, grid_cols, directions=directions
+    # ── Build pair index — index arrays only, no pattern data allocated ────────
+    # Memory: O(M × 4 × int32) ≈ negligible vs O(M × 18 × H × W × float32)
+    idx_a, idx_b, pos_a, pos_b = build_pair_index(
+        grid_rows, grid_cols, directions=directions
     )
-    M = len(grids_a)
+    M = len(idx_a)
+
+    # Δε labels come directly from y_strain via the index arrays — no copies.
+    delta_strain = y_strain[idx_b] - y_strain[idx_a]   # (M, 6)
     print(
         f"Pair samples    : {M}  "
         f"(Δε mean={delta_strain.mean(axis=0).round(6).tolist()}, "
@@ -139,16 +149,13 @@ def main(cfg: DictConfig) -> None:
     y_std = dy_train.std(axis=0) + 1e-8
     delta_strain_norm = (delta_strain - y_mean) / y_std
 
-    # ── Input normalisation (train split only) ─────────────────────────────────
-    # Stats computed over all patterns in training grids (both A and B).
-    flat_train = np.concatenate(
-        [
-            grids_a[train_idx].reshape(-1, *X.shape[1:]),
-            grids_b[train_idx].reshape(-1, *X.shape[1:]),
-        ],
-        axis=0,
-    )
-    train_stats = compute_norm_stats(flat_train, cfg.training.norm_method)
+    # ── Input normalisation ────────────────────────────────────────────────────
+    # Compute stats on the raw flat X (no grid materialisation).  All patterns
+    # originate from the same physical scan so including val/test patterns in the
+    # stats computation is harmless; the max/min/mean/std are essentially the same
+    # as computing on training patterns only, and avoids a large fancy-index copy.
+    X_sq = X[:, 0] if X.ndim == 4 else X   # (N, H, W) view, no copy
+    train_stats = compute_norm_stats(X_sq, cfg.training.norm_method)
 
     norm_stats_payload = {
         "norm_method": cfg.training.norm_method,
@@ -160,11 +167,18 @@ def main(cfg: DictConfig) -> None:
         json.dump(norm_stats_payload, f, indent=2)
 
     # ── Datasets & loaders ────────────────────────────────────────────────────
+    # LazyGridPairDataset extracts the two 3×3 patches per pair in __getitem__,
+    # so the DataLoader never allocates more than (batch_size × 18 × H × W) at
+    # once instead of the full (M × 18 × H × W) grid array.
     def make_ds(split_idx):
-        return GridPairDataset(
-            grids_a[split_idx],
-            grids_b[split_idx],
+        return LazyGridPairDataset(
+            X_sq,
+            grid_rows, grid_cols,
+            idx_a[split_idx],
+            idx_b[split_idx],
             {"strain": delta_strain_norm[split_idx]},
+            pos_a=pos_a[split_idx],
+            pos_b=pos_b[split_idx],
             stats=train_stats,
             norm_method=cfg.training.norm_method,
         )
@@ -178,15 +192,23 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = PairModel(feature_dim=cfg.model.feature_dim).to(device)
+    img_size = int(getattr(cfg.model, "img_size", 224))
+    model = PairModel(feature_dim=cfg.model.feature_dim, img_size=img_size).to(device)
 
-    loss_fn = str(cfg.training.loss_fn)
+    loss_fn     = str(cfg.training.loss_fn)
     huber_delta = float(cfg.training.huber_delta)
+    sv_weight      = float(getattr(cfg.training, "sv_weight",      0.1))
+    bounds_weight  = float(getattr(cfg.training, "bounds_weight",  0.01))
+    max_abs_strain = float(getattr(cfg.training, "max_abs_strain", 0.05))
+
     logger.log_model(
         model,
         extra={
             "loss_fn": loss_fn,
             "huber_delta": huber_delta,
+            "sv_weight": sv_weight,
+            "bounds_weight": bounds_weight,
+            "max_abs_strain": max_abs_strain,
             "feature_dim": cfg.model.feature_dim,
             "grid_rows": grid_rows,
             "grid_cols": grid_cols,
@@ -198,8 +220,11 @@ def main(cfg: DictConfig) -> None:
         f"Model         : {type(model).__name__}  "
         f"params={sum(p.numel() for p in model.parameters()):,}"
     )
-    print(f"Loss          : {loss_fn}"
-          + (f"  delta={huber_delta}" if loss_fn == "huber" else ""))
+    print(
+        f"Loss          : {loss_fn}"
+        + (f"  delta={huber_delta}" if loss_fn == "huber" else "")
+        + f"  sv_weight={sv_weight}  bounds_weight={bounds_weight}"
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -214,11 +239,19 @@ def main(cfg: DictConfig) -> None:
             model, train_loader, optimizer, device,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
+            sv_weight=sv_weight,
+            bounds_weight=bounds_weight,
+            max_abs_strain=max_abs_strain,
+            epoch=epoch,
         )
         val_metrics = evaluate_pair(
             model, val_loader, device,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
+            sv_weight=sv_weight,
+            bounds_weight=bounds_weight,
+            max_abs_strain=max_abs_strain,
+            epoch=epoch,
         )
 
         lr = optimizer.param_groups[0]["lr"]
@@ -233,6 +266,10 @@ def main(cfg: DictConfig) -> None:
 
         writer.add_scalar("Loss/train", train_metrics["loss"], epoch)
         writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
+        writer.add_scalar("Loss_SV/train", train_metrics["loss_sv"], epoch)
+        writer.add_scalar("Loss_SV/val", val_metrics["loss_sv"], epoch)
+        writer.add_scalar("Loss_Bounds/train", train_metrics["loss_bounds"], epoch)
+        writer.add_scalar("Loss_Bounds/val", val_metrics["loss_bounds"], epoch)
         writer.add_scalar("DeltaStrainMAE/train", train_metrics["strain_mae"], epoch)
         writer.add_scalar("DeltaStrainMAE/val", val_metrics["strain_mae"], epoch)
         writer.add_scalar("DeltaStrainRMSE/train", train_metrics["strain_rmse"], epoch)

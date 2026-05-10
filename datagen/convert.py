@@ -2,15 +2,18 @@
 HDF5 → .npy converter — Stage 3 of the data generation pipeline.
 
 Reads:
-  - <exp_dir>/Fe_EBSD_patterns.h5       — EMsoft output (patterns + Euler angles)
+  - <exp_dir>/Fe_EBSD_patterns.h5             — EMsoft output (patterns + Euler)
   - <exp_dir>/<experiment_name>_Ftensors.npy  — F tensors saved by sampler
   - <exp_dir>/<experiment_name>_euler.npy     — Euler angles saved by sampler
+  - <exp_dir>/<experiment_name>_positions.npy — [row,col] per pattern (spatial mode)
 
 Writes to processed_dir:
   - X_patterns.npy     (N, 1, H, W)  float32  — raw patterns (channel-first)
-  - y_strain.npy       (N, 6)     float64  — Voigt strain
-  - y_quaternion.npy   (N, 4)     float64  — unit quaternions
-  - y_euler.npy        (N, 3)     float64  — Euler angles in degrees
+  - y_strain.npy       (N, 6)        float64  — Voigt strain
+  - y_quaternion.npy   (N, 4)        float64  — unit quaternions
+  - y_euler.npy        (N, 3)        float64  — Euler angles in degrees
+  - y_positions.npy    (N, 2)        int32    — [row, col] scan positions
+                                                  (spatial mode only)
 
 This module decouples the training pipeline from the raw HDF5 format and from
 whatever EMsoft may or may not write back into its output file. Labels always
@@ -28,15 +31,18 @@ def convert(
     ftensors_npy: str,
     euler_npy: str,
     out_dir: str,
+    positions_npy: str | None = None,
 ) -> dict[str, str]:
     """
     Convert one EMsoft HDF5 file + sampler labels into training-ready .npy files.
 
     Args:
-        h5_path:      Path to Fe_EBSD_patterns.h5.
-        ftensors_npy: Path to <exp>_Ftensors.npy from sampler.
-        euler_npy:    Path to <exp>_euler.npy from sampler.
-        out_dir:      Output directory for .npy files.
+        h5_path:       Path to Fe_EBSD_patterns.h5.
+        ftensors_npy:  Path to <exp>_Ftensors.npy from sampler.
+        euler_npy:     Path to <exp>_euler.npy from sampler.
+        out_dir:       Output directory for .npy files.
+        positions_npy: Path to <exp>_positions.npy from sampler (spatial mode only).
+                       When provided, y_positions.npy is written to out_dir.
 
     Returns:
         dict mapping dataset role → absolute output path.
@@ -77,12 +83,22 @@ def convert(
 
     # ── Write outputs ─────────────────────────────────────────────────────────
     # Add channel dim: (N, H, W) → (N, 1, H, W) as expected by the ML pipeline
-    outputs = {
+    outputs: dict[str, tuple[np.ndarray, str]] = {
         "X_patterns.npy":   (patterns[:, np.newaxis].astype(np.float32), "float32"),
-        "y_strain.npy":     (voigt_strain.astype(np.float64), "float64"),
-        "y_quaternion.npy": (quaternions.astype(np.float64),  "float64"),
-        "y_euler.npy":      (euler.astype(np.float64),        "float64"),
+        "y_strain.npy":     (voigt_strain.astype(np.float64),            "float64"),
+        "y_quaternion.npy": (quaternions.astype(np.float64),             "float64"),
+        "y_euler.npy":      (euler.astype(np.float64),                   "float64"),
     }
+
+    if positions_npy is not None and os.path.exists(positions_npy):
+        positions = np.load(positions_npy)               # (N, 2) int32
+        if len(positions) != N_h5:
+            print(
+                f"  [convert] WARNING: positions file has {len(positions)} entries "
+                f"but {N_h5} patterns — skipping y_positions.npy."
+            )
+        else:
+            outputs["y_positions.npy"] = (positions.astype(np.int32), "int32")
 
     paths = {}
     print(f"\n[convert] Writing to: {out_dir}")
@@ -103,7 +119,8 @@ def run_from_config(cfg: dict, sampler_paths: dict) -> dict[str, str]:
     Args:
         cfg:           Parsed config.yaml dict.
         sampler_paths: Dict from datagen/sampler.run_from_config() with keys
-                       'angles_txt', 'ftensors_npy', 'euler_npy'.
+                       'angles_txt', 'ftensors_npy', 'euler_npy', and
+                       optionally 'positions_npy'.
 
     Returns:
         Dict of output .npy paths.
@@ -123,8 +140,9 @@ def run_from_config(cfg: dict, sampler_paths: dict) -> dict[str, str]:
         )
 
     return convert(
-        h5_path      = h5_path,
-        ftensors_npy = sampler_paths["ftensors_npy"],
-        euler_npy    = sampler_paths["euler_npy"],
-        out_dir      = out_dir,
+        h5_path       = h5_path,
+        ftensors_npy  = sampler_paths["ftensors_npy"],
+        euler_npy     = sampler_paths["euler_npy"],
+        out_dir       = out_dir,
+        positions_npy = sampler_paths.get("positions_npy"),
     )

@@ -9,13 +9,17 @@ import os
 import numpy as np
 
 
-# Expected shapes and dtypes for every output file.
-# Shape entries use None for dimensions that are data-dependent (N, H, W).
+# Required files that must always be present.
 _EXPECTED = {
-    "X_patterns.npy":   {"ndim": 3, "shape_suffix": (None, None), "dtype": np.float32},
+    "X_patterns.npy":   {"ndim": 4, "shape_suffix": (None, None), "dtype": np.float32},
     "y_strain.npy":     {"ndim": 2, "shape_suffix": (6,),          "dtype": np.float64},
     "y_quaternion.npy": {"ndim": 2, "shape_suffix": (4,),          "dtype": np.float64},
     "y_euler.npy":      {"ndim": 2, "shape_suffix": (3,),          "dtype": np.float64},
+}
+
+# Optional files present only for spatial (Stage 2/3) datasets.
+_OPTIONAL = {
+    "y_positions.npy":  {"ndim": 2, "shape_suffix": (2,),          "dtype": np.int32},
 }
 
 
@@ -65,12 +69,21 @@ def validate_processed_dir(processed_dir: str, strict: bool = True) -> dict:
         if os.path.exists(fpath):
             arrays[fname] = np.load(fpath)
 
+    # Optional files — load silently if present; validate if found.
+    for fname in _OPTIONAL:
+        fpath = os.path.join(processed_dir, fname)
+        if os.path.exists(fpath):
+            arrays[fname] = np.load(fpath)
+
     if not arrays:
         raise ValidationError(f"No .npy files found in {processed_dir}")
 
     # ── 2. Shape / dtype ─────────────────────────────────────────────────────
+    all_specs = {**_EXPECTED, **_OPTIONAL}
     for fname, arr in arrays.items():
-        exp = _EXPECTED[fname]
+        exp = all_specs.get(fname)
+        if exp is None:
+            continue
         if arr.ndim != exp["ndim"]:
             _warn(f"{fname}: expected {exp['ndim']}D, got {arr.ndim}D")
         for dim_idx, expected_size in enumerate(exp["shape_suffix"], start=1):
@@ -117,6 +130,26 @@ def validate_processed_dir(processed_dir: str, strict: bool = True) -> dict:
             _warn(f"y_strain.npy: max |ε| = {abs_max:.4f} — unusually large (>50% strain)")
         summary["strain_range"] = (float(eps.min()), float(eps.max()))
 
+    # ── 8. Scan-position sanity (spatial mode only) ───────────────────────────
+    if "y_positions.npy" in arrays:
+        pos = arrays["y_positions.npy"]
+        N_pos = pos.shape[0]
+        N_ref = n_patterns
+        if N_pos != N_ref:
+            _warn(f"y_positions.npy: has {N_pos} rows but N={N_ref}")
+        if pos.min() < 0:
+            _warn(f"y_positions.npy: negative position values found (min={pos.min()})")
+        rows_seen = np.unique(pos[:, 0])
+        cols_seen = np.unique(pos[:, 1])
+        summary["scan_rows"] = int(rows_seen.max() + 1)
+        summary["scan_cols"] = int(cols_seen.max() + 1)
+        expected_N = summary["scan_rows"] * summary["scan_cols"]
+        if expected_N != N_ref:
+            _warn(
+                f"y_positions.npy: grid {summary['scan_rows']}×{summary['scan_cols']}"
+                f" = {expected_N} ≠ N={N_ref}"
+            )
+
     summary["warnings"] = warnings
     summary["passed"] = len(warnings) == 0
     return summary
@@ -144,6 +177,8 @@ def print_summary(processed_dir: str) -> None:
     if "strain_range" in result:
         lo, hi = result["strain_range"]
         print(f"  Strain Voigt  : [{lo:.6f}, {hi:.6f}]")
+    if "scan_rows" in result:
+        print(f"  Scan grid     : {result['scan_rows']} × {result['scan_cols']}  (spatial mode)")
 
     if result["passed"]:
         print(f"\n  ✓ All checks passed.")

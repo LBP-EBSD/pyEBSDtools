@@ -1,4 +1,4 @@
-CONFIG ?= config.yaml
+CONFIG ?= datagen/configs/config.yaml
 # Use .venv if it exists (created by `make venv`), otherwise fall back to system python3
 PYTHON ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || [ -f venv/bin/python ] && echo venv/bin/python || (command -v python3 || command -v python))
 

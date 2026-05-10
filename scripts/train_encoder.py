@@ -161,9 +161,11 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
+    img_size = int(getattr(cfg.model, "img_size", 224))
     model = SinglePatternModel(
         feature_dim=cfg.model.feature_dim,
         predict_orientation=cfg.training.predict_orientation,
+        img_size=img_size,
     ).to(device)
 
     loss_fn = str(cfg.training.loss_fn)

@@ -35,9 +35,9 @@ class PairModel(nn.Module):
         Analogous to DIC (digital image correlation) in full-field strain measurement.
     """
 
-    def __init__(self, feature_dim: int = 128):
+    def __init__(self, feature_dim: int = 128, img_size: int = 224):
         super().__init__()
-        self.encoder = Encoder(out_dim=feature_dim)
+        self.encoder = Encoder(out_dim=feature_dim, img_size=img_size)
         self.head = RelativeStrainHead(in_channels=feature_dim)
 
     def _encode_grid(self, grid: torch.Tensor) -> torch.Tensor:

@@ -17,9 +17,10 @@ model:
   # Each of the 9 patterns is encoded independently with shared weights.
   # 128 is a safe default; 256 gives more capacity at the cost of 9× the memory.
   feature_dim: 128
+  img_size: 224   # resize each 480×640 pattern on GPU before ResNet18
 
 data:
-  path: "data/"
+  path: "data/processed"
   patterns_file: "X_patterns.npy"
   strain_file: "y_strain.npy"
 

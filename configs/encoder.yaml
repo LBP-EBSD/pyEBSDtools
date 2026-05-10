@@ -20,9 +20,10 @@ model:
   # Encoder output / shared embedding size.
   # ResNet18 backbone has 512-d features before the projection; 256 is a good default.
   feature_dim: 256
+  img_size: 224   # resize each 480×640 pattern on GPU before ResNet18
 
 data:
-  path: "data/"
+  path: "data/processed"
   patterns_file: "X_patterns.npy"
   strain_file: "y_strain.npy"
   orientation_file: "y_quaternion.npy"  # only loaded if predict_orientation=true

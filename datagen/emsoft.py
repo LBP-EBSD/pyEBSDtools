@@ -20,14 +20,11 @@ All NML file paths are relative to EMdatapathname (/home/EMuser/EMPlay).
 import os
 import subprocess
 import textwrap
-import shlex
-from pathlib import Path
 
 
 # ─── Container-side paths (fixed by EMsoft Docker image) ─────────────────────
 _CONTAINER_EMPLAY  = "/home/EMuser/EMPlay"
 _CONTAINER_XTAL    = "/home/EMuser/XtalFolder"
-_CONTAINER_CONFIG  = "/root/.config/EMsoft/EMsoftConfig.json"
 
 
 class NMLWriter:

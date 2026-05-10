@@ -1,562 +1,509 @@
-# Model Usage Notes (Current)
+# Operational Reference — pyEBSDtools
 
-This file is the quick operational reference for data prep, training, evaluation,
-and inference in this repo.
+Everything you need to run this codebase: commands, what they do internally,
+what files they produce, and how each stage connects to the next.
 
 ---
 
-## 0) Three-stage model overview
+## Stage map
 
 | Stage | Model | Input | Output | Script |
 |-------|-------|-------|--------|--------|
 | 1 | `SinglePatternModel` | 1 pattern `(B,1,H,W)` | ε `(B,6)` | `train_encoder.py` |
 | 2 | `GridModel` | 3×3 grid `(B,9,1,H,W)` | ε at center `(B,6)` | `train_grid.py` |
-| 3 | `PairModel` | 2 grids `(B,9,1,H,W)` × 2 | Δε `(B,6)` | `train_pair.py` |
+| 3 | `PairModel` | 2 grids × `(B,9,1,H,W)` | Δε `(B,6)` | `train_pair.py` |
 
-Stage 1 is a debug baseline — it collapses to mean-zero strain because the mapping
-is ill-posed. Stage 2 adds spatial context. Stage 3 predicts **relative** strain
-(Δε = ε_B − ε_A), which is the physically meaningful, well-posed target.
-
-Weights from every run are saved to `outputs/YYYY-MM-DD/HH-MM-SS/checkpoints/`.
+Stage 1 is a debug baseline — it collapses to near-zero strain because the
+single-pattern → absolute-strain mapping is ill-posed. Stage 2 adds spatial
+context from neighbours. Stage 3 predicts **Δε = ε_B − ε_A** (relative strain
+between adjacent scan points), which is well-posed and mirrors HR-EBSD physics.
 
 ---
 
-## 1) Setup
-
-From repo root:
+## Quick start
 
 ```bash
+# Install deps
 pip install -r requirements.txt
-```
 
-Optional TensorBoard:
+# Generate Stage 2/3 data (10 000 patterns, 100×100 spatial field, ~2–3 h GPU)
+make generate CONFIG=datagen/configs/spatial_100x100.yaml
 
-```bash
+# Train Stage 3 pair model
+python scripts/train_pair.py data.grid_rows=100 data.grid_cols=100
+
+# Watch training live
 tensorboard --logdir outputs --port 6006
 ```
 
 ---
 
-## 2) Data preparation workflow
+## 1. Data generation pipeline
 
-### 2.1 Generate EMsoft angle/strain file
+### 1.1 Four stages inside `make generate`
 
-Script: `scripts/generate_angles.py`
-
-Two modes: **random** (Stage 1 baseline) and **spatial** (Stage 2 / 3 training data).
-
-#### Random mode — Stage 1 baseline
-
-```bash
-python scripts/generate_angles.py -n 10000 --strain-type multiaxial -s 0.02 --seed 42
-python scripts/generate_angles.py -n 1000 --orient-only
+```
+config.yaml
+  │
+  ├─ Stage 1 (make sample)   → datagen/sampler.py + angle_generation.py
+  │   Writes to ~/EMsoftData/{experiment_name}/:
+  │     {exp}_angles.txt       — EMEBSD input (orpcdef: Euler + F-tensor per pattern)
+  │     {exp}_Ftensors.npy     — (N, 3, 3) deformation tensors
+  │     {exp}_euler.npy        — (N, 3) Euler angles in degrees
+  │     {exp}_positions.npy    — (N, 2) [row, col] per pattern  ← spatial mode only
+  │     {exp}_metadata.json    — grid dims + generation settings ← spatial mode only
+  │     config_snapshot.yaml   — exact config used
+  │
+  ├─ Stage 2 (make simulate)  → datagen/emsoft.py → Docker (EMMCOpenCL → EMEBSDmaster → EMEBSD)
+  │   Writes to ~/EMsoftData/{experiment_name}/:
+  │     Fe_MCoutput.h5         — Monte Carlo + master pattern
+  │     Fe_EBSD_patterns.h5    — synthetic pattern stack
+  │
+  ├─ Stage 3 (make convert)   → datagen/convert.py
+  │   Writes to data/processed/ (paths.processed_dir):
+  │     X_patterns.npy         — (N, 1, H, W) float32   ← channel-first, PyTorch-ready
+  │     y_strain.npy           — (N, 6) float64   Voigt [ε11 ε22 ε33 ε23 ε13 ε12]
+  │     y_quaternion.npy       — (N, 4) float64   unit quaternion [q0 q1 q2 q3]
+  │     y_euler.npy            — (N, 3) float64   Euler angles (reference)
+  │     y_positions.npy        — (N, 2) int32     [row, col]  ← spatial mode only
+  │
+  └─ Stage 4 (make validate)  → helpers/validate.py
+      Prints a sanity-check report (shapes, dtypes, NaN, quaternion norms, strain bounds)
 ```
 
-Main flags:
-- `-n, --n-patterns`
-- `-o, --output`, `--seed`, `--xpc`, `--ypc`, `--L`, `--comment`
-- `--strain-type` (`uniform|uniaxial_x|uniaxial_y|uniaxial_z|biaxial_xy|biaxial_yz|biaxial_xz|multiaxial|shear_xy|shear_xz|shear_yz|random|none`)
-- `-s, --strain-magnitude`   max strain e.g. `0.02` = 2%
-- `--uniform-strain`         fixed hydrostatic strain
-- `--orient-only`            no strain tensor
+> **Only Stage 2 takes a long time** (~2–3 h for 10 000 patterns on GPU).
+> All other stages finish in seconds to a few minutes.
+> Stages can be run individually — see §1.3.
+
+### 1.2 Which config to use
+
+| Use case | Config |
+|----------|--------|
+| Stage 2/3 training data (recommended) | `datagen/configs/spatial_100x100.yaml` |
+| Stage 1 baseline / custom experiments | `datagen/configs/config.yaml` (edit inline) |
+
+**`spatial_100x100.yaml`** — pre-configured for a 100×100 = 10 000 pattern spatial
+field with `field_type: combined`, `seed: 42`, orientation drift ~1°.
+Output goes to `~/EMsoftData/Fe_FCC_spatial_100x100/` and `data/spatial_100x100/`.
+
+```bash
+# Stage 2/3 data — full run
+make generate CONFIG=datagen/configs/spatial_100x100.yaml
+
+# Stage 1 data — edit datagen/configs/config.yaml first, then:
+make generate
+```
+
+### 1.3 Partial pipeline runs
+
+```bash
+# Run individual stages only:
+make sample    CONFIG=...   # Stage 1: angles + labels (fast)
+make simulate  CONFIG=...   # Stage 2: Docker/EMsoft only (slow)
+make convert   CONFIG=...   # Stage 3: HDF5 → .npy (fast)
+make validate  CONFIG=...   # Stage 4: sanity check
+
+# Skip specific stages:
+make skip-simulate CONFIG=...   # Stages 1, 3, 4 — reuse existing .h5
+make skip-sample   CONFIG=...   # Stages 2, 3, 4 — reuse existing angles
+
+# Background (log to file):
+make generate-bg CONFIG=datagen/configs/spatial_100x100.yaml
+```
+
+### 1.4 Strain field types (spatial mode)
+
+What `SpatialFieldGenerator` actually computes:
+
+| `field_type` | Physical scenario | ε range |
+|-------------|------------------|---------|
+| `uniaxial_gradient` | Tensile specimen; ε11 ramps linearly across scan, Poisson contraction in ε22/ε33 | 5×10⁻⁴ – 3×10⁻³ |
+| `pure_bending` | 3-point bend specimen; ε11 varies through height, zero at neutral axis | 1×10⁻³ – 5×10⁻³ |
+| `gaussian_inclusion` | Hard carbide / indenter / void; Gaussian strain bump + shear | 2×10⁻³ – 8×10⁻³ |
+| `shear_gradient` | Torsion bar / shear-band precursor; ε12 linear or sinusoidal | 5×10⁻⁴ – 4×10⁻³ |
+| `biaxial_gradient` | Thin-film thermal mismatch; ε11=ε22 radially from centre | 5×10⁻⁴ – 4×10⁻³ |
+| `combined` | Random weighted mix of 2+ of the above **(default, recommended)** | varies |
+
+All fields are geometrically compatible by construction (derived from smooth
+analytic displacement fields or superpositions thereof). Poisson's ratio = 0.29
+(Fe) is used for transverse contraction in normal-strain fields.
+
+### 1.5 Position ordering
+
+Every pattern `i` maps to:
+
+```
+row = i // grid_cols
+col = i % grid_cols
+```
+
+Row-major C order, same as EMsoft scan order. `y_positions.npy` makes this
+explicit — it's required by the Saint-Venant loss in Stage 3 training.
+
+### 1.6 Strain labels — what convention
+
+`y_strain.npy` is **engineering Voigt** `[ε11, ε22, ε33, 2ε23, 2ε13, 2ε12]`
+computed via **Green-Lagrange**: `E = ½(FᵀF − I)`, then off-diagonals × 2.
+
+This is the standard engineering/Voigt convention used throughout the codebase.
+The F-tensors fed to EMsoft are `F = I + ε` (small-strain approximation) with
+tensor shear components in the off-diagonals.
+
+### 1.7 Useful inspection commands
+
+```bash
+# Visualise generated patterns from HDF5
+python scripts/visualize.py ~/EMsoftData/Fe_FCC_spatial_100x100/Fe_EBSD_patterns.h5 --grid
+
+# Validate processed data
+make validate CONFIG=datagen/configs/spatial_100x100.yaml
+
+# Quick numpy shape check
+python -c "import numpy as np; d='data/spatial_100x100'; \
+  [print(f, np.load(f'{d}/{f}').shape) for f in \
+  ['X_patterns.npy','y_strain.npy','y_positions.npy']]"
+```
 
 ---
 
-#### Spatial mode — Stage 2 / 3 training data
+## 2. Docker / EMsoft details
 
-Generates a **spatially correlated, physically realistic strain field** on a 2D scan
-grid. Pattern `i` maps to `(i // grid_cols, i % grid_cols)` (row-major).
+The pipeline manages Docker automatically. Below is what happens under the hood
+and what to do if it breaks.
 
-> `grid_rows × grid_cols` must equal the number of patterns EMsoft will produce.
-> Set `ipf_wd = grid_cols` and `ipf_ht = grid_rows` in `EMEBSD.nml`.
+### 2.1 What `make simulate` does internally
 
-```bash
-# Recommended starting point — 100×100 scan, combined field, orientation drift on
-python scripts/generate_angles.py --spatial-field \
-    --grid-rows 100 --grid-cols 100 --seed 42
-
-# Pure bending, constant orientation (isolates strain signal)
-python scripts/generate_angles.py --spatial-field \
-    --grid-rows 100 --grid-cols 100 \
-    --field-type pure_bending --constant-orientation --seed 42
-
-# Gaussian inclusion / stress concentration, 2× larger strain
-python scripts/generate_angles.py --spatial-field \
-    --grid-rows 64 --grid-cols 64 \
-    --field-type gaussian_inclusion --field-scale 2.0 --seed 7
-
-# Shear gradient, perfectly smooth (no noise)
-python scripts/generate_angles.py --spatial-field \
-    --grid-rows 100 --grid-cols 100 \
-    --field-type shear_gradient --noise-frac 0 --seed 1
-
-# Uniaxial tension, 2° misorientation drift across scan (realistic subgrain)
-python scripts/generate_angles.py --spatial-field \
-    --grid-rows 100 --grid-cols 100 \
-    --field-type uniaxial_gradient --orientation-spread 2.0 --seed 3
+```
+datagen/emsoft.py:NMLWriter   → writes EMMCOpenCL.nml, EMEBSDmaster.nml,
+                                  EMEBSDmasterOCL.nml, BetheParameters.nml, EMEBSD.nml
+datagen/emsoft.py:DockerRunner:
+  Docker run 1: EMMCOpenCL → Fe_MCoutput.h5    (Monte Carlo, GPU, ~10–30 min once per crystal)
+                EMEBSDmasterOpenCL              (master pattern, GPU, ~5–20 min once per crystal)
+  Host step:    h5py renames EBSDMasterOpenCLNameList → EBSDMasterNameList  (GPU-master patch)
+  Docker run 2: EMEBSD → Fe_EBSD_patterns.h5   (pattern generation, ~2–3 h for 10k patterns)
 ```
 
-**Field types (`--field-type`):**
+> **Monte Carlo + master pattern only need to run once per crystal structure.**
+> If `Fe_MCoutput.h5` already exists, EMsoft skips those steps.
+> Use `make skip-simulate` to reuse an existing `.h5` without re-running Docker.
 
-| Type | Physical case | ε magnitude |
-|------|--------------|-------------|
-| `uniaxial_gradient` | Tensile specimen along loading axis | 5e-4 – 3e-3 |
-| `pure_bending` | 3-pt bending through cross-section height | 1e-3 – 5e-3 |
-| `gaussian_inclusion` | Carbide / indentation / void concentration | 2e-3 – 8e-3 |
-| `shear_gradient` | Torsion bar / shear-band precursor | 5e-4 – 4e-3 |
-| `biaxial_gradient` | Thin-film thermal mismatch / pressure field | 5e-4 – 4e-3 |
-| `combined` | Random weighted mix of the above **(recommended)** | varies |
-
-**Spatial mode flags:**
-
-- `--spatial-field`           activate spatial mode (required)
-- `--grid-rows / --grid-cols` scan dimensions (default 100×100)
-- `--field-type`              see table above (default `combined`)
-- `--field-scale`             multiplier on strain (default 1.0; try 0.5–2.0)
-- `--constant-orientation`    single fixed orientation for all points (default: drifting)
-- `--orientation-spread`      RMS misorientation drift in degrees (default 1.0°; realistic: 0.5–2°)
-- `--noise-frac`              spatially-correlated noise as fraction of peak strain (default 0.05)
-
-Output file (auto): `data/raw/{rows}x{cols}_{field_type}_spatial.txt`
-
-The script prints per-component strain statistics and the exact `EMEBSD.nml` snippet.
-
-### 2.2 Run EMsoft (Docker) — generate the HDF5 file
-
-> This is the **only step that takes hours**. Everything else is fast.
-> Steps 2.1 and 2.3–2.5 all run on the host (no Docker needed).
-
-EMsoft has 3 sub-steps. Steps A and B only need to run **once per crystal structure**.
-Only Step C (EMEBSD) needs to re-run each time you change the angle/strain file.
-
-#### One-time setup: start Docker with persistent storage
+### 2.2 One-time setup
 
 ```bash
-mkdir -p ~/EMsoftData/Fe_FCC_exp
+# Pull Docker image (once)
+make docker-pull
 
-docker run --gpus all \
-  --device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm \
-  -v ~/EMsoftData:/home/EMuser/EMPlay \
-  -v ~/EMsoftData/Fe_FCC:/home/EMuser/XtalFolder \
-  -it marcdegraef/emsoft_sdk:buildx-latest bash
+# Check Docker + GPU are working
+make docker-check
+
+# Set up crystal file (copies Ni.xtal → Fe_FCC.xtal from inside the Docker image)
+make setup-xtal
+make setup-xtal CONFIG=datagen/configs/spatial_100x100.yaml
 ```
 
-Everything written inside `/home/EMuser/EMPlay/` appears on your host at `~/EMsoftData/`.
+### 2.3 Expected runtimes
 
-#### One-time setup: crystal file (inside Docker)
-
-```bash
-# Copy Ni.xtal (FCC proxy for Fe FCC) — only needed once
-ls /home/EMs/EMsoftData/                        # check what's available
-cp /home/EMs/EMsoftData/Ni.xtal /home/EMuser/XtalFolder/Fe_FCC.xtal
-# If not found, clone EMsoftData first:
-# cd /home/EMs && git clone https://github.com/EMsoft-org/EMsoftData.git
-```
-
-#### One-time setup: EMsoftConfig.json (inside Docker, first time only)
-
-```bash
-cat > ~/.config/EMsoft/EMsoftConfig.json << 'EOF'
-{
-    "EMsoftpathname": "/home/EMs/EMsoft/",
-    "EMXtalFolderpathname": "/home/EMuser/XtalFolder",
-    "EMdatapathname": "/home/EMuser/EMPlay",
-    "EMtmppathname": "/home/EMuser/.config/EMsoft/tmp/",
-    "EMsoftLibraryLocation": "/home/EMs/EMsoftBuild/Release/Bin/",
-    "EMNotify": "",
-    "Develop": "No",
-    "UserName": "DockerUser",
-    "UserLocation": "DockerContainer",
-    "Release": "Yes"
-}
-EOF
-```
-
-#### Step A — Monte Carlo (run once per crystal, ~10–30 min GPU)
-
-```bash
-# Inside Docker:
-cat > /home/EMuser/EMPlay/Fe_FCC_exp/EMMCOpenCL.nml << 'EOF'
- &MCCLdata
-  mode = 'full',
-  xtalname = 'Fe_FCC.xtal',
-  sig = 70.0,
-  omega = 0.0,
-  numsx = 801,
-  num_el = 10,
-  globalworkgrpsz = 150,
-  totnum_el = 2000000000,
-  multiplier = 1,
-  EkeV = 30.0,
-  Ehistmin = 15.0,
-  Ebinsize = 1.0,
-  depthmax = 100.0,
-  depthstep = 1.0,
-  platid = 1,
-  devid = 1,
-  dataname = 'Fe_FCC_exp/Fe_MCoutput.h5',
-  Notify = 'Off',
- /
-EOF
-
-EMMCOpenCL /home/EMuser/EMPlay/Fe_FCC_exp/EMMCOpenCL.nml
-```
-
-#### Step B — Master pattern (run once per crystal, ~2–20 min)
-
-```bash
-# Inside Docker:
-cat > /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSDmaster.nml << 'EOF'
- &EBSDmastervars
-  dmin = 0.05,
-  npx = 500,
-  nthreads = 4,
-  doLegendre = .FALSE.,
-  energyfile = 'Fe_FCC_exp/Fe_MCoutput.h5',
-  BetheParametersFile = 'Fe_FCC_exp/BetheParameters.nml',
-  Notify = 'Off',
- /
-EOF
-
-cat > /home/EMuser/EMPlay/Fe_FCC_exp/BetheParameters.nml << 'EOF'
- &BetheList
-  c1 = 8.0,
-  c2 = 50.0,
-  c3 = 100.0,
-  sgdbdiff = 1.0,
- /
-EOF
-
-# CPU (slower):
-EMEBSDmaster /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSDmaster.nml
-
-# GPU alternative (3–10× faster):
-# EMEBSDmasterOpenCL /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSDmasterOCL.nml
-```
-
-#### Step C — Pattern generation (re-run for each new dataset)
-
-This is the step you re-run when you have a new angle/strain file.
-
-**For Stage 1 (random patterns):**
-
-```bash
-# On host — generate the angle file:
-python scripts/generate_angles.py \
-    -n 10000 --strain-type multiaxial -s 0.02 --seed 42 \
-    -o ~/EMsoftData/Fe_FCC_exp/stage1_10k_multiaxial.txt
-
-# Inside Docker — run EMEBSD:
-cat > /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSD_stage1.nml << 'EOF'
- &EBSDdata
-  L = 15000.0,
-  thetac = 10.0,
-  delta = 50.0,
-  numsx = 640,
-  numsy = 480,
-  xpc = 0.0,
-  ypc = 0.0,
-  energymin = 10.0,
-  energymax = 25.0,
-  includebackground = 'n',
-  anglefile = 'Fe_FCC_exp/stage1_10k_multiaxial.txt',
-  anglefiletype = 'orpcdef',
-  eulerconvention = 'tsl',
-  masterfile = 'Fe_FCC_exp/Fe_EBSDmaster.h5',
-  datafile = 'Fe_FCC_exp/stage1_10k_multiaxial.h5',
-  bitdepth = 'float',
-  beamcurrent = 150.0,
-  dwelltime = 100.0,
-  poisson = 'n',
-  binning = 1,
-  applyDeformation = 'y',
-  Fframe = 'crys',
-  scalingmode = 'not',
-  gammavalue = 1.0,
-  makedictionary = 'n',
-  maskpattern = 'n',
-  nthreads = 4,
- /
-EOF
-
-EMEBSD /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSD_stage1.nml
-# Output: ~/EMsoftData/Fe_FCC_exp/stage1_10k_multiaxial.h5
-```
-
-**For Stage 2 / 3 (spatial field):**
-
-```bash
-# On host — generate spatial angle file:
-python scripts/generate_angles.py \
-    --spatial-field --grid-rows 100 --grid-cols 100 \
-    --field-type combined --seed 42 \
-    -o ~/EMsoftData/Fe_FCC_exp/spatial_100x100_combined.txt
-# (script prints the exact ipf_wd/ipf_ht values to put in the nml)
-
-# Inside Docker — run EMEBSD:
-cat > /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSD_spatial.nml << 'EOF'
- &EBSDdata
-  L = 15000.0,
-  thetac = 10.0,
-  delta = 50.0,
-  numsx = 640,
-  numsy = 480,
-  xpc = 0.0,
-  ypc = 0.0,
-  energymin = 10.0,
-  energymax = 25.0,
-  includebackground = 'n',
-  anglefile = 'Fe_FCC_exp/spatial_100x100_combined.txt',
-  anglefiletype = 'orpcdef',
-  eulerconvention = 'tsl',
-  masterfile = 'Fe_FCC_exp/Fe_EBSDmaster.h5',
-  datafile = 'Fe_FCC_exp/spatial_100x100_combined.h5',
-  bitdepth = 'float',
-  beamcurrent = 150.0,
-  dwelltime = 100.0,
-  poisson = 'n',
-  binning = 1,
-  applyDeformation = 'y',
-  Fframe = 'crys',
-  scalingmode = 'not',
-  gammavalue = 1.0,
-  makedictionary = 'n',
-  maskpattern = 'n',
-  nthreads = 4,
- /
-EOF
-# Note: numsx=640, numsy=480 are PATTERN pixel dimensions, not scan grid dims.
-# The scan grid (100×100=10000 patterns) comes entirely from the angle file.
-
-EMEBSD /home/EMuser/EMPlay/Fe_FCC_exp/EMEBSD_spatial.nml
-# Output: ~/EMsoftData/Fe_FCC_exp/spatial_100x100_combined.h5
-```
-
-**Expected runtimes (EMEBSD, CPU, 4 threads):**
-
-| N patterns | Time |
-|-----------|------|
-| 1 000 | ~15 min |
-| 10 000 | ~2–3 h |
-| 100 000 | ~15–30 h |
+| Step | Hardware | Time |
+|------|----------|------|
+| EMMCOpenCL (2B electrons) | GPU | ~20–40 min |
+| EMEBSDmasterOpenCL | GPU | ~5–20 min |
+| EMEBSD — 1 000 patterns | CPU 16 threads | ~15 min |
+| EMEBSD — 10 000 patterns | CPU 16 threads | ~2–3 h |
+| EMEBSD — 100 000 patterns | CPU 16 threads | ~15–30 h |
 
 ---
 
-### 2.3 Convert HDF5 to NumPy — dataset naming convention
+## 3. Training
 
-> **Datasets should not change.** EMsoft runs take hours. Each dataset lives in
-> its own named subdirectory and is never overwritten accidentally.
-> The `--force` flag is required to overwrite existing files.
+> **The Makefile has no training targets.** It is purely for data generation.
+> Training and inference are always run directly as `python scripts/...`.
 
-```bash
-# Stage 1 dataset
-python scripts/prepare_numpy.py \
-    --h5 ~/EMsoftData/Fe_FCC_exp/stage1_10k_multiaxial.h5 \
-    --out data/stage1_10k_multiaxial/
+All training scripts use **Hydra** for config. Override any field on the CLI
+without `--` prefix: `key=value` or `section.key=value`.
 
-# Spatial dataset (Stage 2 / 3)
-python scripts/prepare_numpy.py \
-    --h5 ~/EMsoftData/Fe_FCC_exp/spatial_100x100_combined.h5 \
-    --out data/spatial_100x100_combined/
+Outputs go to `outputs/YYYY-MM-DD/HH-MM-SS/` automatically.
 
-# If you genuinely need to re-convert (e.g. re-ran EMsoft):
-python scripts/prepare_numpy.py \
-    --h5 ~/EMsoftData/Fe_FCC_exp/spatial_100x100_combined.h5 \
-    --out data/spatial_100x100_combined/ --force
-```
-
-Flags:
-- `--h5` (required)
-- `--out`   — always use a descriptive named subdirectory
-- `--force` — required to write into a directory that already has `.npy` files
-
-Output files (per dataset directory):
-- `X_patterns.npy`   — `(N, H, W)` float32
-- `y_euler.npy`      — `(N, 3)` Bunge Euler in degrees
-- `y_quaternion.npy` — `(N, 4)` unit quaternion
-- `y_strain.npy`     — `(N, 6)` Voigt strain `[ε11 ε22 ε33 ε23 ε13 ε12]`
-
-### 2.4 Visualize raw patterns
-
-Script: `scripts/visualize.py`
+### 3.1 Stage 1 — single pattern → ε  (debug baseline)
 
 ```bash
-python scripts/visualize.py /path/to/your_data.h5 --grid --heatmap
+python scripts/train_encoder.py
+# Override common knobs:
+python scripts/train_encoder.py training.epochs=100 training.lr=5e-4
+python scripts/train_encoder.py model.feature_dim=256 training.predict_orientation=true
+python scripts/train_encoder.py training.loss_fn=mae
 ```
 
-Main flags:
-- positional `data_path`
-- `--output-dir, -o`
-- `--grid`
-- `--single N`
-- `--compare N M`
-- `--heatmap`
-- `--histogram`
-- `--export-tiff`
-- `--export-png`
-- `--all`
+Config: `configs/encoder.yaml` — `data.path` defaults to `data/processed`.
 
----
+**What happens inside:**
+1. Loads `X_patterns.npy` + `y_strain.npy` (+ `y_quaternion.npy` if `predict_orientation=true`)
+2. Splits by random index (train/val/test)
+3. Normalises input (minmax or zscore) on train split; same stats applied to val
+4. Normalises targets (z-score on train Δε)
+5. ResNet18 (grayscale-adapted) → 128-d feature → MLP heads → ε + optionally q
+6. Loss: Huber on ε + geodesic loss on q (if orientation enabled)
+7. Cosine-annealing LR schedule
 
-## 3) Training workflow
-
-### 3.1 Stage 1 — single pattern → ε (debug baseline)
-
-```bash
-python scripts/train_encoder.py data.path=data/stage1_10k_multiaxial
-python scripts/train_encoder.py data.path=data/stage1_10k_multiaxial training.epochs=100 training.lr=5e-4
-python scripts/train_encoder.py data.path=data/stage1_10k_multiaxial model.feature_dim=256
-python scripts/train_encoder.py data.path=data/stage1_10k_multiaxial training.predict_orientation=true
-```
-
-Config: `configs/encoder.yaml`
-
-Key fields:
-- `training.epochs`, `training.batch_size`, `training.lr`
-- `training.val_split`, `training.test_split` (set `0.0` to disable)
-- `training.norm_method` (`minmax|zscore`)
-- `training.loss_fn` (`huber|mae|mse`), `training.huber_delta`
-- `training.predict_orientation`, `training.orientation_loss_weight`
-- `model.feature_dim`
-- `data.path`, `data.patterns_file`, `data.strain_file`, `data.orientation_file`
+**Why it fails:** Predicting absolute ε from one pattern is ill-posed — many
+orientations/strains produce visually similar patterns. The model collapses to
+predicting near the training mean.
 
 ---
 
 ### 3.2 Stage 2 — 3×3 grid → ε at center
 
 ```bash
-python scripts/train_grid.py \
-    data.path=data/spatial_100x100_combined data.grid_rows=100 data.grid_cols=100
-python scripts/train_grid.py \
-    data.path=data/spatial_100x100_combined data.grid_rows=100 data.grid_cols=100 \
-    model.feature_dim=256 training.epochs=100
+python scripts/train_grid.py data.grid_rows=100 data.grid_cols=100
+# With overrides:
+python scripts/train_grid.py data.grid_rows=100 data.grid_cols=100 \
+    model.feature_dim=256 training.epochs=100 training.batch_size=8
 ```
 
-Config: `configs/grid.yaml`
+Config: `configs/grid.yaml` — `data.path` defaults to `data/processed`.
 
-Key fields (on top of the shared ones above):
-- `data.grid_rows`, `data.grid_cols` — **required**; must satisfy `rows × cols == N patterns`
-- `model.feature_dim` — shared encoder output size (default 128; 9× memory vs Stage 1 per batch)
-- `training.batch_size` — default 16; reduce if OOM
-
-How grids are built from the flat scan:
-- Interior points only (1 ≤ r ≤ rows-2, 1 ≤ c ≤ cols-2) → M = (rows-2)×(cols-2) samples
-- Boundary patterns are discarded (no complete 3×3 ring)
+**What happens inside:**
+1. Loads `X_patterns.npy` + `y_strain.npy`
+2. `build_grid_samples(X, y, grid_rows, grid_cols)` reshapes the flat scan into
+   a 2D grid and extracts all 3×3 neighbourhoods around interior points
+   → `(M, 9, H, W)` grids + `(M, 6)` labels (ε at center, index 4)
+   → M = (rows-2) × (cols-2) = 9 604 for a 100×100 scan
+3. Random index split, then train/val/test normalisation
+4. `GridModel`: shared ResNet18 encodes all 9 patterns → `(B, 128, 3, 3)` feature map
+   → `SpatialStrainHead` (Conv2D + center-skip + MLP) → ε(center)
 
 ---
 
-### 3.3 Stage 3 — pair of grids → Δε (relative strain)
+### 3.3 Stage 3 — pair of grids → Δε  ← primary model
 
 ```bash
-python scripts/train_pair.py \
-    data.path=data/spatial_100x100_combined data.grid_rows=100 data.grid_cols=100
-python scripts/train_pair.py \
-    data.path=data/spatial_100x100_combined data.grid_rows=100 data.grid_cols=100 \
-    data.directions=[horizontal] training.batch_size=4
+python scripts/train_pair.py data.grid_rows=100 data.grid_cols=100
+# Common overrides:
+python scripts/train_pair.py data.grid_rows=100 data.grid_cols=100 \
+    training.epochs=100 training.batch_size=4 training.sv_weight=0.2
+# Horizontal pairs only (faster, half the data):
+python scripts/train_pair.py data.grid_rows=100 data.grid_cols=100 \
+    data.directions=[horizontal]
 ```
 
-Config: `configs/pair.yaml`
+Config: `configs/pair.yaml` — `data.path` defaults to `data/processed`.
 
-Key fields:
-- `data.grid_rows`, `data.grid_cols` — **required**
-- `data.directions` — list of `horizontal` and/or `vertical` (default both)
-  - `horizontal`: A=(r,c) → B=(r,c+1)
-  - `vertical`:   A=(r,c) → B=(r+1,c)
-- `model.feature_dim` — default 128; 18× memory vs Stage 1 per batch
-- `training.batch_size` — default 8; reduce if OOM
+**What happens inside:**
+1. Loads `X_patterns.npy` + `y_strain.npy`
+2. `build_pair_samples(X, y, grid_rows, grid_cols, directions)` produces:
+   - `grids_a` `(M, 9, H, W)` — 3×3 neighbourhood around point A
+   - `grids_b` `(M, 9, H, W)` — 3×3 neighbourhood around adjacent point B
+   - `delta_strain` `(M, 6)` — Δε = ε_B − ε_A
+   - `pos_a`, `pos_b` `(M, 2)` — `[row, col]` of each center (used by SV loss)
+   - For a 100×100 scan, both directions → ~19 600 pairs
+3. Random index split on pairs (note: adjacent pairs overlap in patterns — see §5)
+4. `GridPairDataset` returns 5-tuple: `(grid_a, grid_b, targets, pos_a, pos_b)`
+5. `PairModel`: same shared encoder for all 18 patterns →
+   `F_A (B,128,3,3)`, `F_B (B,128,3,3)` → subtract → `RelativeStrainHead` → Δε
 
-What the model learns:
-- Input: two 3×3 grids around adjacent scan points A and B
-- Architecture: shared encoder → F_A, F_B → subtract → conv head → Δε
-- Subtraction cancels shared orientation/intensity bias, isolates deformation signal
+**Loss function (3 terms):**
 
-To reconstruct absolute ε from predictions: accumulate Δε along rows/columns
-(cumulative sum or least-squares integration — reconstruction script TBD).
+```
+L = L_regression + sv_weight * L_sv + bounds_weight * L_bounds
+```
+
+| Term | What it does |
+|------|-------------|
+| `L_regression` | Huber/MAE/MSE on Δε vs ground truth |
+| `L_sv` (Saint-Venant) | Loop consistency: for every complete rectangle in the batch, the sum of Δε around the loop must be zero — i.e., `Δε_h(r,c) + Δε_v(r,c+1) − Δε_h(r+1,c) − Δε_v(r,c) = 0`. This enforces that predictions are integrable (compatible strain field). Weight `sv_weight=0.1` by default. |
+| `L_bounds` | Quadratic penalty for any Δε component exceeding `max_abs_strain` (default 5%). Prevents the network from predicting physically impossible large values to cheat regression loss. |
+
+Set `sv_weight=0.0` to run without the SV constraint (pure regression).
+
+**TensorBoard scalars logged:**
+- `Loss/train`, `Loss/val` — total loss
+- `Loss_SV/train`, `Loss_SV/val` — Saint-Venant term alone
+- `Loss_Bounds/train`, `Loss_Bounds/val` — bounds penalty alone
+- `DeltaStrainMAE/train`, `DeltaStrainMAE/val`
+- `DeltaStrainRMSE/train`, `DeltaStrainRMSE/val`
+- `PerComponentMAE_val/delta_{e11..e12}` — per-component
+
+**Key config knobs for pair.yaml:**
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `data.grid_rows`, `data.grid_cols` | 100, 100 | Must satisfy rows×cols == N patterns |
+| `data.directions` | `[horizontal, vertical]` | Which adjacency directions to pair |
+| `model.feature_dim` | 128 | Shared encoder output size; 18× memory vs Stage 1 per batch |
+| `training.batch_size` | 8 | Reduce to 4 if OOM |
+| `training.sv_weight` | 0.1 | Saint-Venant loop-consistency weight |
+| `training.bounds_weight` | 0.01 | Physical-magnitude penalty weight |
+| `training.max_abs_strain` | 0.05 | Soft cap on Δε components (5%) |
+| `training.loss_fn` | `huber` | `huber \| mae \| mse` |
 
 ---
 
-### Per-run outputs (all three stages)
+### 3.4 Per-run outputs (all stages)
 
-Inside `outputs/YYYY-MM-DD/HH-MM-SS/`:
-- `checkpoints/best.pt`            — lowest val loss checkpoint
-- `checkpoints/last.pt`            — end-of-training checkpoint
-- `checkpoints/norm_stats.json`    — input + target normalisation stats
-- `checkpoints/split_indices.json` — train/val/test index arrays
-- `config_snapshot.json`           — exact config used
-- `metrics.csv` / `metrics.json`   — per-epoch metrics
-- `tensorboard/`                   — TensorBoard event files
+```
+outputs/YYYY-MM-DD/HH-MM-SS/
+  checkpoints/
+    best.pt                  ← lowest val-loss checkpoint
+    last.pt                  ← end-of-training checkpoint
+    norm_stats.json          ← input + target normalisation stats
+    split_indices.json       ← train/val/test index arrays
+  config_snapshot.json       ← exact Hydra config used
+  metrics.csv                ← per-epoch: loss, strain_mae, strain_rmse, per-component MAE
+  metrics.json               ← same, JSON format
+  tensorboard/               ← TensorBoard event files
+```
+
+Load norm stats at inference time:
+```python
+import json, numpy as np
+ns = json.load(open("outputs/.../checkpoints/norm_stats.json"))
+# Pattern normalisation: ns["min"], ns["max"]  (minmax mode)
+# Target denormalisation: ns["y_mean"], ns["y_std"]
+pred_physical = pred_normalised * np.array(ns["y_std"]) + np.array(ns["y_mean"])
+```
 
 ---
 
-## 4) Evaluation workflow (Stage 1 only, split-aware)
+## 4. Evaluation and inference (Stage 1)
 
-Script: `scripts/infer_eval.py`
+> Stage 2 and Stage 3 evaluation scripts are not yet written.
 
-Default behavior:
-- uses latest run
-- evaluates on `val` split
+### 4.1 Full evaluation — `infer_eval.py`
 
 ```bash
+# Val split of the most recent run (default):
 python scripts/infer_eval.py
+
+# Specific run / split:
 python scripts/infer_eval.py --run-dir outputs/2026-04-29/14-00-58 --split val
-python scripts/infer_eval.py --split train
-python scripts/infer_eval.py --split test
-python scripts/infer_eval.py --split all
-python scripts/infer_eval.py --checkpoint last.pt --batch-size 128 --max-samples 1000
+python scripts/infer_eval.py --split train    # overfit check
+python scripts/infer_eval.py --split test     # held-out (only if test_split > 0)
+python scripts/infer_eval.py --split all      # full dataset
+
+# Speed / memory control:
+python scripts/infer_eval.py --batch-size 128 --max-samples 2000
+
+# Skip scatter plot (headless servers):
+python scripts/infer_eval.py --no-plot
 ```
 
-Flags:
-- `--run-dir` (default latest)
-- `--split` (`val|train|test|all`, default `val`)
-- `--data-dir` (default from run `config_snapshot.json`)
-- `--patterns-file`
-- `--strain-file`
-- `--checkpoint` (`best.pt|last.pt`)
-- `--batch-size`
-- `--max-samples`
-- `--spot-checks`
-- `--no-plot`
+Outputs (written to run dir):
+- `eval_scatter_{split}.png` — 2×3 grid of pred-vs-true scatter for each Voigt component
+- `eval_results_{split}.json` — overall MAE, RMSE, max error, per-component MAE
 
-Outputs:
-- `eval_scatter_<split>.png`
-- `eval_results_<split>.json`
-
-> Stage 2 and Stage 3 eval scripts are not yet written.
-
----
-
-## 5) Single-sample inference (Stage 1)
-
-Script: `scripts/infer.py`
+### 4.2 Single-sample inference — `infer.py`
 
 ```bash
-python scripts/infer.py
-python scripts/infer.py --run-dir outputs/2026-04-29/14-00-58 --index 5
-python scripts/infer.py --save-plot pred.png
+python scripts/infer.py                        # latest run, sample 0
+python scripts/infer.py --index 42             # specific sample
+python scripts/infer.py --save-plot pred.png   # save figure
+python scripts/infer.py --run-dir outputs/... --checkpoint last.pt
 ```
-
-Flags:
-- `--run-dir` (default latest)
-- `--data-dir` (default from run config)
-- `--patterns-file`
-- `--index`
-- `--checkpoint`
-- `--save-plot`
-
-Notes:
-- Predictions are denormalized back to physical strain units.
-- Script is forward-only (expects `y_mean/y_std` in `norm_stats.json`).
 
 ---
 
-## 6) Practical defaults and recommendations
+## 5. Known limitations and caveats
 
-- Use `--split val` for model quality checks.
-- Use `--split train` only for overfit/debug checks.
-- Use `--split test` only when `training.test_split > 0`.
-- Keep `--split all` for broad sanity checks, not for unbiased performance.
-- If evaluating older runs that predate split index saving, retrain once with
-  current `train_encoder.py`.
-- For Stage 2 / 3: random split at the sample level has pattern overlap between
-  splits (adjacent grids share up to 6 of 9 patterns). Fine for development.
-  For rigorous evaluation, split by scan region.
+### Train/val split has spatial overlap for Stage 2/3
+
+`build_pair_samples` splits randomly over pairs. Adjacent pairs share 6 of 9
+patterns in their grids, so training and validation sets are not independent.
+This inflates val metrics slightly. For rigorous evaluation, split by scan
+region (e.g., left half for train, right half for val) — not yet implemented.
+
+### Stage 1 collapses
+
+A single EBSD pattern does not contain enough information to uniquely determine
+small elastic strains. The model collapses to predicting near-zero strain
+(close to the training mean). Use Stage 2 or Stage 3.
+
+### Stage 3 outputs Δε, not absolute ε
+
+To recover the full strain map: accumulate Δε predictions along rows and
+columns (cumulative sum or least-squares path integration from a reference
+point). This reconstruction script does not exist yet.
+
+### Patterns must stay float32
+
+`X_patterns.npy` stores raw EMsoft float32 intensities. Never convert to PNG
+for training — PNG is 8-bit and destroys the subtle intensity gradients that
+encode strain information. PNG is for visualisation only.
+
+### SV loop loss activates only when complete rectangles are in the batch
+
+The Saint-Venant loop-consistency loss (`L_sv`) finds rectangular loops whose
+four constituent pairs are all in the current batch. With small batch sizes
+(e.g., 4 or 8) and random shuffling, only a fraction of batches will contain
+complete loops. Increase `batch_size` or temporarily disable shuffling to
+increase loop-hit rate. The loss returns 0.0 silently when no loops are found.
+
+---
+
+## 6. Makefile target reference
+
+```
+make help                 Print this summary
+make venv                 Create .venv and install Python deps
+make docker-pull          Pull EMsoft image from Docker Hub
+make docker-build         Build EMsoft image locally
+make docker-check         Verify Docker + GPU are available
+make setup-xtal           Copy Ni.xtal → Fe_FCC.xtal from image
+
+make generate             Full pipeline (stages 1–4)
+make generate-bg          Full pipeline in background (log to file)
+make sample               Stage 1 only (angles + label .npy files)
+make simulate             Stage 2 only (Docker/EMsoft)
+make convert              Stage 3 only (HDF5 → .npy)
+make validate             Stage 4 only (sanity check)
+make skip-simulate        Stages 1, 3, 4 — reuse existing .h5
+make skip-sample          Stages 2, 3, 4 — reuse existing angles
+make preview              Visualise HDF5 patterns (opens window)
+
+make sync                 rsync code to REMOTE_HOST:REMOTE_DIR
+make clean                Remove all generated data
+make clean-raw            Remove data/raw/ only
+make clean-processed      Remove data/processed/ only
+
+# Pass a different config:
+make generate CONFIG=datagen/configs/spatial_100x100.yaml
+```
+
+---
+
+## 7. File layout reference
+
+```
+datagen/configs/
+  config.yaml                ← default (edit for custom runs)
+  spatial_100x100.yaml       ← ready-to-use Stage 2/3 config
+
+configs/
+  encoder.yaml               ← Stage 1 hyperparams  data.path=data/processed
+  grid.yaml                  ← Stage 2 hyperparams  data.path=data/processed
+  pair.yaml                  ← Stage 3 hyperparams  data.path=data/processed
+
+data/processed/              ← training .npy files (after make convert)
+  X_patterns.npy   (N,1,H,W) float32
+  y_strain.npy     (N,6)     float64  Voigt ε
+  y_quaternion.npy (N,4)     float64  unit quaternion
+  y_euler.npy      (N,3)     float64  Euler degrees
+  y_positions.npy  (N,2)     int32    [row,col]  ← spatial mode only
+
+~/EMsoftData/{experiment_name}/   ← raw EMsoft outputs
+  {exp}_angles.txt
+  {exp}_Ftensors.npy
+  {exp}_euler.npy
+  {exp}_positions.npy        ← spatial mode only
+  {exp}_metadata.json        ← spatial mode only
+  config_snapshot.yaml
+  Fe_MCoutput.h5
+  Fe_EBSD_patterns.h5
+
+outputs/YYYY-MM-DD/HH-MM-SS/     ← per-run training outputs
+  checkpoints/best.pt
+  checkpoints/last.pt
+  checkpoints/norm_stats.json
+  checkpoints/split_indices.json
+  config_snapshot.json
+  metrics.csv / metrics.json
+  tensorboard/
+```

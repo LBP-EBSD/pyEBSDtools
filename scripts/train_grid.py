@@ -53,7 +53,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lbp_kikuchi.data.dataset import GridDataset, build_grid_samples, compute_norm_stats
+from lbp_kikuchi.data.dataset import LazyGridDataset, build_grid_index, compute_norm_stats
 from lbp_kikuchi.models.grid_model import GridModel
 from lbp_kikuchi.training.engine import evaluate, train_one_epoch
 from lbp_kikuchi.utils.config import cfg_to_dict
@@ -85,6 +85,8 @@ def make_splits(N: int, val_frac: float, test_frac: float, seed: int) -> tuple:
 def main(cfg: DictConfig) -> None:
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device        : {device}"
+          + (f"  [{torch.cuda.get_device_name(0)}]" if device.type == "cuda" else ""))
 
     run_dir = Path(HydraConfig.get().runtime.output_dir)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
@@ -105,9 +107,10 @@ def main(cfg: DictConfig) -> None:
     print(f"Loaded  y     : {y_strain.shape}  dtype={y_strain.dtype}")
     print(f"Scan grid     : {grid_rows} × {grid_cols} = {grid_rows * grid_cols} points")
 
-    # Build 3×3 grid samples from the flat scan data.
-    grids, y_grids = build_grid_samples(X, y_strain, grid_rows, grid_cols)
-    M = len(grids)
+    # ── Build grid index — index arrays only, no pattern data allocated ────────
+    center_idx = build_grid_index(grid_rows, grid_cols)   # (M,) int32
+    y_grids    = y_strain[center_idx]                     # (M, 6) centre labels
+    M = len(center_idx)
     print(f"Grid samples  : {M}  (interior points of {grid_rows}×{grid_cols} scan)")
 
     test_frac = float(getattr(cfg.training, "test_split", 0.0))
@@ -125,10 +128,10 @@ def main(cfg: DictConfig) -> None:
     y_std = y_train.std(axis=0) + 1e-8
     y_grids_norm = (y_grids - y_mean) / y_std
 
-    # ── Input normalisation (train split only) ─────────────────────────────────
-    # Stats computed over all patterns in all training grids.
-    flat_train = grids[train_idx].reshape(-1, *X.shape[1:])
-    train_stats = compute_norm_stats(flat_train, cfg.training.norm_method)
+    # ── Input normalisation ────────────────────────────────────────────────────
+    # Compute on the raw flat X — avoids materialising all M×9 grids upfront.
+    X_sq = X[:, 0] if X.ndim == 4 else X   # (N, H, W) view, no copy
+    train_stats = compute_norm_stats(X_sq, cfg.training.norm_method)
 
     norm_stats_payload = {
         "norm_method": cfg.training.norm_method,
@@ -140,9 +143,13 @@ def main(cfg: DictConfig) -> None:
         json.dump(norm_stats_payload, f, indent=2)
 
     # ── Datasets & loaders ────────────────────────────────────────────────────
+    # LazyGridDataset builds each 3×3 grid in __getitem__ from the flat X,
+    # keeping memory at O(N × H × W) instead of O(M × 9 × H × W).
     def make_ds(split_idx):
-        return GridDataset(
-            grids[split_idx],
+        return LazyGridDataset(
+            X_sq,
+            grid_rows, grid_cols,
+            center_idx[split_idx],
             {"strain": y_grids_norm[split_idx]},
             stats=train_stats,
             norm_method=cfg.training.norm_method,
@@ -157,7 +164,8 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = GridModel(feature_dim=cfg.model.feature_dim).to(device)
+    img_size = int(getattr(cfg.model, "img_size", 224))
+    model = GridModel(feature_dim=cfg.model.feature_dim, img_size=img_size).to(device)
 
     loss_fn = str(cfg.training.loss_fn)
     huber_delta = float(cfg.training.huber_delta)
@@ -194,11 +202,13 @@ def main(cfg: DictConfig) -> None:
             model, train_loader, optimizer, device,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
+            epoch=epoch,
         )
         val_metrics = evaluate(
             model, val_loader, device,
             loss_fn=loss_fn,
             huber_delta=huber_delta,
+            epoch=epoch,
         )
 
         lr = optimizer.param_groups[0]["lr"]

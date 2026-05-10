@@ -25,11 +25,12 @@ class SinglePatternModel(nn.Module):
         predict_orientation:  Whether to attach and train the orientation head.
     """
 
-    def __init__(self, feature_dim: int = 128, predict_orientation: bool = False):
+    def __init__(self, feature_dim: int = 128, predict_orientation: bool = False,
+                 img_size: int = 224):
         super().__init__()
         self.predict_orientation = predict_orientation
 
-        self.encoder = Encoder(out_dim=feature_dim)
+        self.encoder = Encoder(out_dim=feature_dim, img_size=img_size)
         self.strain_head = StrainHead(in_dim=feature_dim)
 
         if predict_orientation:
