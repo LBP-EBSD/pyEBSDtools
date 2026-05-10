@@ -1,0 +1,90 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# config.yaml — Single source of truth for the data generation pipeline.
+#
+# Edit this file, then run:   make generate
+#
+# All paths under [paths] are relative to the repo root, except data_dir and
+# xtal_dir which are absolute (or ~-expanded) host paths.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Generation parameters ────────────────────────────────────────────────────
+generation:
+  # Stage 1 uses datagen/angle_generation.py (AngleStrainGenerator / SpatialFieldGenerator).
+  n_patterns:       10000         # total patterns (ignored if spatial_field: true)
+  strain_type:      multiaxial    # uniform | uniaxial_x/y/z | biaxial_xy/yz/xz
+                                  # multiaxial | shear_xy/xz/yz | random | none
+  strain_magnitude: 0.02          # max |ε| (e.g. 0.02 = 2% strain)
+  seed:             42            # integer seed for reproducibility (null = random)
+  xpc:              0.0           # pattern centre x offset in pixels
+  ypc:              0.0           # pattern centre y offset in pixels
+  # uniform_strain: 0.005        # optional: fixed hydrostatic strain (forces strain_type uniform)
+
+  # Spatially correlated strain (same as: python generate_angles.py --spatial-field …)
+  spatial_field:    false         # true → grid_rows × grid_cols patterns, field_type below
+  grid_rows:        100           # scan height (only if spatial_field)
+  grid_cols:        100           # scan width  (only if spatial_field)
+  field_type:       combined      # uniaxial_gradient | pure_bending | gaussian_inclusion |
+                                   # shear_gradient | biaxial_gradient | combined
+  field_scale:      1.0           # strain amplitude scale for spatial fields
+  constant_orientation: false     # false → slow orientation drift across scan
+  orientation_spread: 1.0         # degrees (when constant_orientation is false)
+  noise_frac:       0.05          # strain-field noise as fraction of peak amplitude
+
+
+# ── EMsoft simulation parameters ─────────────────────────────────────────────
+emsoft:
+  # Crystal
+  xtalname:                Fe_FCC.xtal   # file in xtal_dir — copy Ni.xtal and rename
+                                         # run `make setup-xtal` to do this automatically
+
+  # Detector geometry
+  pattern_width:           640           # numsx in EMEBSD.nml
+  pattern_height:          480           # numsy in EMEBSD.nml
+  camera_distance_um:      15000.0       # L — detector-to-sample distance (μm)
+  sample_tilt_deg:         70.0          # sig  — sample tilt in EMMCOpenCL.nml
+  detector_tilt_deg:       10.0          # thetac — detector tilt in EMEBSD.nml
+                                         # NOTE: sig ≠ thetac — do NOT confuse them
+
+  # Beam / energy
+  accelerating_voltage_keV: 30.0
+  energy_min_keV:           10.0
+  energy_max_keV:           25.0
+
+  # Monte Carlo
+  n_mc_electrons:          2000000000   # totnum_el — 2B for production quality
+  mc_grid_size:            501          # numsx in EMMCOpenCL.nml (use 801 for production)
+
+  # Compute
+  n_threads:               16           # CPU master uses this many threads — raise for kratos
+  use_gpu:                 true         # true → EMEBSDmasterOpenCL (GPU, fast)
+                                         # Pipeline auto-patches the HDF5 group name so
+                                         # EMEBSD can read GPU-master output correctly.
+
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker:
+  # Full EMsoft image — compiled binaries included, PATH already set:
+  image: marcdegraef/emsoft:buildx-latest
+
+  # NOTE: do NOT use marcdegraef/emsoft_sdk:buildx-latest — that is the
+  #       build-dependencies image only, it has no EMsoft executables.
+
+  # Local build (after `make docker-build`):
+  # image: emsoft:local
+
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  # Host-side persistent storage (outside the repo, survives container removal).
+  # data_dir is mounted to /home/EMuser/EMPlay inside the container.
+  # ALL raw outputs (NML files, .h5, labels.npy) go here — the container
+  # must be able to see them, so they cannot live inside the repo.
+  data_dir:   ~/EMsoftData             # mounted to /home/EMuser/EMPlay in container
+  xtal_dir:   ~/EMsoftData/XtalFolder  # mounted to /home/EMuser/XtalFolder
+
+  # Repo-relative directory for the final .npy training files only
+  processed_dir: data/processed        # final .npy files consumed by training
+
+  # Unique name for this experiment run (used for subdirectory + file names)
+  experiment_name: Fe_FCC_10000

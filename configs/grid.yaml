@@ -1,0 +1,31 @@
+experiment_name: "stage2_grid"
+seed: 42
+
+training:
+  epochs: 50
+  batch_size: 16      # 9 patterns per sample → ~4× memory vs Stage 1
+  lr: 1.0e-3
+  val_split: 0.15
+  test_split: 0.05
+  norm_method: "minmax"
+  num_workers: 4
+  loss_fn: "huber"
+  huber_delta: 0.5
+
+model:
+  # Encoder output / shared embedding size.
+  # Each of the 9 patterns is encoded independently with shared weights.
+  # 128 is a safe default; 256 gives more capacity at the cost of 9× the memory.
+  feature_dim: 128
+  img_size: 224   # resize each 480×640 pattern on GPU before ResNet18
+
+data:
+  path: "data/processed"
+  patterns_file: "X_patterns.npy"
+  strain_file: "y_strain.npy"
+
+  # Scan grid dimensions — must satisfy grid_rows * grid_cols == N patterns.
+  # Interior points only produce valid grids: M = (rows-2) * (cols-2).
+  # Example: a 100×100 scan has 10000 patterns → 9604 grid samples.
+  grid_rows: 100
+  grid_cols: 100

@@ -17,16 +17,18 @@ Usage:
 import argparse
 import os
 import sys
+from pathlib import Path
 
-import h5py
 import numpy as np
-import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from load_data import EBSDDataLoader
+# Force local src imports.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from lbp_kikuchi.data.loader import EBSDDataLoader
 
 
 def plot_grid(loader, output_path=None, cols=None, cmap='gray'):

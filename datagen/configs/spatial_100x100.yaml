@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# spatial_100x100.yaml — 100×100 spatially-correlated strain field dataset
+#
+# Run with:  make generate CONFIG=datagen/configs/spatial_100x100.yaml
+#            make sample   CONFIG=datagen/configs/spatial_100x100.yaml  (angles only)
+#
+# Produces 10 000 patterns (100 rows × 100 cols) with a combined spatial strain
+# field and slow orientation drift (~1°) across the scan.
+# Output: ~/EMsoftData/Fe_FCC_spatial_100x100/
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Generation parameters ────────────────────────────────────────────────────
+generation:
+  # n_patterns is ignored when spatial_field: true — N = grid_rows × grid_cols
+  n_patterns:       10000         # (ignored)
+
+  # Spatial field settings
+  spatial_field:    true          # ← activates spatial mode
+  grid_rows:        100           # scan height in pixels (scan rows)
+  grid_cols:        100           # scan width  in pixels (scan cols)
+
+  field_type:       combined      # random weighted mix of all field types (recommended)
+                                  # alternatives: uniaxial_gradient | pure_bending |
+                                  #   gaussian_inclusion | shear_gradient | biaxial_gradient
+
+  field_scale:      1.0           # strain amplitude multiplier (1.0 = default physical range)
+  constant_orientation: false     # false → realistic slow misorientation drift across scan
+  orientation_spread: 1.0         # RMS spread in degrees (0.5–2° is physically realistic)
+  noise_frac:       0.05          # spatially-correlated noise as fraction of peak strain
+
+  seed:             42            # reproducibility
+  xpc:              0.0           # pattern centre x offset (pixels)
+  ypc:              0.0           # pattern centre y offset (pixels)
+
+
+# ── EMsoft simulation parameters ─────────────────────────────────────────────
+emsoft:
+  xtalname:                Fe_FCC.xtal
+
+  # Detector geometry
+  pattern_width:           640
+  pattern_height:          480
+  camera_distance_um:      15000.0
+  sample_tilt_deg:         70.0
+  detector_tilt_deg:       10.0
+
+  # Beam / energy
+  accelerating_voltage_keV: 30.0
+  energy_min_keV:           10.0
+  energy_max_keV:           25.0
+
+  # Monte Carlo — same as default (run once per crystal, reuse if already done)
+  n_mc_electrons:          2000000000
+  mc_grid_size:            501
+
+  # Compute
+  n_threads:               16
+  use_gpu:                 true
+
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker:
+  image: marcdegraef/emsoft:buildx-latest
+
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  data_dir:      ~/EMsoftData
+  xtal_dir:      ~/EMsoftData/XtalFolder
+  processed_dir: data/spatial_100x100   # separate from the random dataset
+  experiment_name: Fe_FCC_spatial_100x100

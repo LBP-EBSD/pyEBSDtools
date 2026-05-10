@@ -1,0 +1,59 @@
+experiment_name: "stage3_pair"
+seed: 42
+
+training:
+  epochs: 50
+  batch_size: 32      # 18 patterns per sample (2 × 9); GPU handles (32×18=576) at 224×224 fine
+  lr: 5.0e-4
+  val_split: 0.15
+  test_split: 0.05
+  norm_method: "minmax"
+  num_workers: 8
+  loss_fn: "huber"
+  huber_delta: 0.5
+
+  # ── Saint-Venant / physical-compatibility regularisation ──────────────────
+  # sv_weight: weight on the loop-consistency (integrability) loss term.
+  #   Penalises predicted Δε values that are inconsistent around closed scan
+  #   loops — i.e., enforces that the strain field is derivable from a single
+  #   continuous displacement field (Saint-Venant compatibility).
+  #   Set to 0.0 to disable (pure regression).
+  sv_weight: 0.1
+
+  # bounds_weight: weight on the physical-magnitude penalty.
+  #   Penalises |Δε_pred| > max_abs_strain (component-wise).
+  #   Prevents the network exploiting large spurious values to reduce MSE.
+  bounds_weight: 0.01
+
+  # max_abs_strain: soft cap per Voigt component of Δε (absolute units).
+  #   For adjacent EBSD scan points the inter-point strain difference is
+  #   typically <<1 %. A 5 % cap (0.05) is generous yet physically motivated.
+  max_abs_strain: 0.05
+
+model:
+  # Encoder output size — shared across all 18 patterns (9 per grid × 2 grids).
+  # The relative feature map F_B − F_A has shape (B, feature_dim, 3, 3).
+  feature_dim: 128
+  # Resize each 480×640 pattern to (img_size, img_size) inside the encoder (on GPU).
+  # 224 = ResNet standard; ~6× speedup vs raw 480×640. Set to null to disable.
+  img_size: 224
+
+data:
+  # Directory containing the processed .npy files from datagen/convert.py.
+  # Must match paths.processed_dir in datagen/configs/config.yaml.
+  path: "data/processed"
+  patterns_file: "X_patterns.npy"
+  strain_file: "y_strain.npy"
+
+  # Scan grid dimensions — must satisfy grid_rows * grid_cols == N patterns.
+  # Only valid for data generated with spatial_field: true in config.yaml.
+  grid_rows: 100
+  grid_cols: 100
+
+  # Which adjacency directions to use when building pairs.
+  # 'horizontal': A=(r,c) → B=(r,c+1)
+  # 'vertical':   A=(r,c) → B=(r+1,c)
+  # Both directions provide all information needed for 2D strain field reconstruction.
+  directions:
+    - horizontal
+    - vertical

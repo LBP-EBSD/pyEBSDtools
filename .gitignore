@@ -1,0 +1,73 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Packaging / build
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+pip-wheel-metadata/
+
+# Environments
+venv/
+.venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+*.conda
+
+# Logs
+*.log
+
+# Generated data / outputs
+data/
+outputs/
+
+# PyTorch / checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Large binary / arrays
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Hydra (training sweeps / typo variant)
+multirun/
+hydralance/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Training metrics — keep small repo config files
+*.csv
+*.json
+!config.yaml
+!pyproject.toml
