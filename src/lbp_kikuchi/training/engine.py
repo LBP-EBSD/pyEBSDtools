@@ -27,7 +27,8 @@ def train_one_epoch(
     total_loss = 0.0
     all_preds, all_targets = [], []
 
-    bar = tqdm(loader, desc=f"Train E{epoch}", unit="batch", leave=False)
+    bar = tqdm(loader, desc=f"Train E{epoch}", unit="batch", leave=False,
+               dynamic_ncols=True)
     for X, targets in bar:
         X = X.to(device, non_blocking=True)
         targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
@@ -68,7 +69,8 @@ def evaluate(
     total_loss = 0.0
     all_preds, all_targets = [], []
 
-    bar = tqdm(loader, desc=f"Val   E{epoch}", unit="batch", leave=False)
+    bar = tqdm(loader, desc=f"Val   E{epoch}", unit="batch", leave=False,
+               dynamic_ncols=True)
     for X, targets in bar:
         X = X.to(device)
         targets = _to_device(targets, device)
@@ -104,6 +106,8 @@ def train_one_epoch_pair(
     bounds_weight: float = 0.01,
     max_abs_strain: float = 0.05,
     epoch: int = 0,
+    delta_mean: torch.Tensor | None = None,
+    delta_std: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """
     One training epoch for PairModel.
@@ -120,7 +124,8 @@ def train_one_epoch_pair(
     total_bounds = 0.0
     all_preds, all_targets = [], []
 
-    bar = tqdm(loader, desc=f"Train E{epoch}", unit="batch", leave=False)
+    bar = tqdm(loader, desc=f"Train E{epoch}", unit="batch", leave=False,
+               dynamic_ncols=True)
     for grid_a, grid_b, targets, pos_a, pos_b in bar:
         grid_a  = grid_a.to(device, non_blocking=True)
         grid_b  = grid_b.to(device, non_blocking=True)
@@ -136,6 +141,8 @@ def train_one_epoch_pair(
             sv_weight=sv_weight,
             bounds_weight=bounds_weight,
             max_abs_strain=max_abs_strain,
+            delta_mean=delta_mean,
+            delta_std=delta_std,
         )
 
         optimizer.zero_grad()
@@ -168,6 +175,8 @@ def evaluate_pair(
     bounds_weight: float = 0.01,
     max_abs_strain: float = 0.05,
     epoch: int = 0,
+    delta_mean: torch.Tensor | None = None,
+    delta_std: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """Validation / test evaluation for PairModel."""
     model.eval()
@@ -176,7 +185,8 @@ def evaluate_pair(
     total_bounds = 0.0
     all_preds, all_targets = [], []
 
-    bar = tqdm(loader, desc=f"Val   E{epoch}", unit="batch", leave=False)
+    bar = tqdm(loader, desc=f"Val   E{epoch}", unit="batch", leave=False,
+               dynamic_ncols=True)
     for grid_a, grid_b, targets, pos_a, pos_b in bar:
         grid_a  = grid_a.to(device)
         grid_b  = grid_b.to(device)
@@ -192,6 +202,8 @@ def evaluate_pair(
             sv_weight=sv_weight,
             bounds_weight=bounds_weight,
             max_abs_strain=max_abs_strain,
+            delta_mean=delta_mean,
+            delta_std=delta_std,
         )
         total_loss   += loss.item()
         total_sv     += components["loss_sv"]

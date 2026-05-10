@@ -8,7 +8,7 @@ training:
   val_split: 0.15
   test_split: 0.05
   norm_method: "minmax"
-  num_workers: 4
+  num_workers: 8
   loss_fn: "huber"
   huber_delta: 0.5
 

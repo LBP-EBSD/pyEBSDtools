@@ -53,7 +53,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from lbp_kikuchi.data.dataset import LazyGridDataset, build_grid_index, compute_norm_stats
+from lbp_kikuchi.data.dataset import (
+    LazyGridDataset,
+    build_grid_index,
+    compute_norm_stats,
+    flat_pattern_indices_covering_3x3_centers,
+)
 from lbp_kikuchi.models.grid_model import GridModel
 from lbp_kikuchi.training.engine import evaluate, train_one_epoch
 from lbp_kikuchi.utils.config import cfg_to_dict
@@ -128,10 +133,12 @@ def main(cfg: DictConfig) -> None:
     y_std = y_train.std(axis=0) + 1e-8
     y_grids_norm = (y_grids - y_mean) / y_std
 
-    # ── Input normalisation ────────────────────────────────────────────────────
-    # Compute on the raw flat X — avoids materialising all M×9 grids upfront.
+    # ── Input normalisation (training-visible pixels only, same rule as Stage 1) ─
     X_sq = X[:, 0] if X.ndim == 4 else X   # (N, H, W) view, no copy
-    train_stats = compute_norm_stats(X_sq, cfg.training.norm_method)
+    train_pat_ix = flat_pattern_indices_covering_3x3_centers(
+        center_idx[train_idx], grid_rows, grid_cols
+    )
+    train_stats = compute_norm_stats(X_sq[train_pat_ix], cfg.training.norm_method)
 
     norm_stats_payload = {
         "norm_method": cfg.training.norm_method,
@@ -145,6 +152,8 @@ def main(cfg: DictConfig) -> None:
     # ── Datasets & loaders ────────────────────────────────────────────────────
     # LazyGridDataset builds each 3×3 grid in __getitem__ from the flat X,
     # keeping memory at O(N × H × W) instead of O(M × 9 × H × W).
+    img_size = int(getattr(cfg.model, "img_size", 224))
+
     def make_ds(split_idx):
         return LazyGridDataset(
             X_sq,
@@ -153,6 +162,7 @@ def main(cfg: DictConfig) -> None:
             {"strain": y_grids_norm[split_idx]},
             stats=train_stats,
             norm_method=cfg.training.norm_method,
+            img_size=img_size,
         )
 
     loader_kw = dict(
@@ -164,7 +174,6 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    img_size = int(getattr(cfg.model, "img_size", 224))
     model = GridModel(feature_dim=cfg.model.feature_dim, img_size=img_size).to(device)
 
     loss_fn = str(cfg.training.loss_fn)

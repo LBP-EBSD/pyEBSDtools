@@ -50,6 +50,7 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
+from tqdm import tqdm
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
@@ -63,6 +64,7 @@ from lbp_kikuchi.data.dataset import (
     LazyGridPairDataset,
     build_pair_index,
     compute_norm_stats,
+    flat_pattern_indices_covering_3x3_centers,
 )
 from lbp_kikuchi.models.pair_model import PairModel
 from lbp_kikuchi.training.engine import evaluate_pair, train_one_epoch_pair
@@ -149,13 +151,21 @@ def main(cfg: DictConfig) -> None:
     y_std = dy_train.std(axis=0) + 1e-8
     delta_strain_norm = (delta_strain - y_mean) / y_std
 
-    # ── Input normalisation ────────────────────────────────────────────────────
-    # Compute stats on the raw flat X (no grid materialisation).  All patterns
-    # originate from the same physical scan so including val/test patterns in the
-    # stats computation is harmless; the max/min/mean/std are essentially the same
-    # as computing on training patterns only, and avoids a large fancy-index copy.
+    # Constant Δε denormalisation tensors — MUST be passed into pair_loss so that
+    # Saint-Venant and physical-bounds penalties operate on physical strain units,
+    # not z-scored targets (otherwise max_abs_strain≈0.05 wrongly clips normalized preds).
+    delta_mean_t = torch.tensor(y_mean, dtype=torch.float32)
+    delta_std_t = torch.tensor(y_std, dtype=torch.float32)
+
+    # ── Input normalisation (training-visible pixels only, same rule as Stage 1) ─
     X_sq = X[:, 0] if X.ndim == 4 else X   # (N, H, W) view, no copy
-    train_stats = compute_norm_stats(X_sq, cfg.training.norm_method)
+    train_centers = np.unique(
+        np.concatenate([idx_a[train_idx], idx_b[train_idx]]).astype(np.int64)
+    )
+    train_pat_ix = flat_pattern_indices_covering_3x3_centers(
+        train_centers, grid_rows, grid_cols
+    )
+    train_stats = compute_norm_stats(X_sq[train_pat_ix], cfg.training.norm_method)
 
     norm_stats_payload = {
         "norm_method": cfg.training.norm_method,
@@ -170,6 +180,8 @@ def main(cfg: DictConfig) -> None:
     # LazyGridPairDataset extracts the two 3×3 patches per pair in __getitem__,
     # so the DataLoader never allocates more than (batch_size × 18 × H × W) at
     # once instead of the full (M × 18 × H × W) grid array.
+    img_size = int(getattr(cfg.model, "img_size", 224))
+
     def make_ds(split_idx):
         return LazyGridPairDataset(
             X_sq,
@@ -181,6 +193,7 @@ def main(cfg: DictConfig) -> None:
             pos_b=pos_b[split_idx],
             stats=train_stats,
             norm_method=cfg.training.norm_method,
+            img_size=img_size,   # resize on CPU worker → 6× less GPU transfer
         )
 
     loader_kw = dict(
@@ -192,7 +205,6 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(make_ds(val_idx), shuffle=False, **loader_kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    img_size = int(getattr(cfg.model, "img_size", 224))
     model = PairModel(feature_dim=cfg.model.feature_dim, img_size=img_size).to(device)
 
     loss_fn     = str(cfg.training.loss_fn)
@@ -243,6 +255,8 @@ def main(cfg: DictConfig) -> None:
             bounds_weight=bounds_weight,
             max_abs_strain=max_abs_strain,
             epoch=epoch,
+            delta_mean=delta_mean_t,
+            delta_std=delta_std_t,
         )
         val_metrics = evaluate_pair(
             model, val_loader, device,
@@ -252,6 +266,8 @@ def main(cfg: DictConfig) -> None:
             bounds_weight=bounds_weight,
             max_abs_strain=max_abs_strain,
             epoch=epoch,
+            delta_mean=delta_mean_t,
+            delta_std=delta_std_t,
         )
 
         lr = optimizer.param_groups[0]["lr"]
@@ -261,7 +277,7 @@ def main(cfg: DictConfig) -> None:
             **{f"train_{k}": v for k, v in train_metrics.items()},
             **{f"val_{k}": v for k, v in val_metrics.items()},
         }
-        print(log)
+        tqdm.write(str(log))
         logger.log(log)
 
         writer.add_scalar("Loss/train", train_metrics["loss"], epoch)

@@ -93,7 +93,9 @@ def physical_bounds_loss(
     to low MSE by predicting large-magnitude spurious values.
 
     Args:
-        delta_pred:     (B, 6) predicted Δε.
+        delta_pred:     (B, 6) predicted Δε in **physical** strain units.
+                        ``pair_loss`` denormalises network outputs before calling this;
+                        do not pass z-scored tensors or ``max_abs_strain`` will be wrong.
         max_abs_strain: Soft threshold in absolute strain units. Default 0.05
                         (5%), which is already beyond the elastic limit for
                         most metals but gives the network some headroom.
@@ -140,7 +142,9 @@ def loop_consistency_loss(
     GridPairDataset when positions were not stored), the function returns 0.
 
     Args:
-        delta_pred: (B, 6) predicted Δε values (normalised or raw).
+        delta_pred: (B, 6) predicted Δε in **physical** Voigt units (same linear space as
+                    ground-truth Δε). Per-component z-scores must not be mixed here or loop
+                    residuals are meaningless.
         pos_a:      (B, 2) int tensor — scan position [row, col] of grid A center.
         pos_b:      (B, 2) int tensor — scan position [row, col] of grid B center.
 
@@ -220,6 +224,8 @@ def pair_loss(
     sv_weight: float = 0.1,
     bounds_weight: float = 0.01,
     max_abs_strain: float = 0.05,
+    delta_mean: torch.Tensor | None = None,
+    delta_std: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Full Stage-3 loss: regression + Saint-Venant integrability + physical bounds.
@@ -229,25 +235,44 @@ def pair_loss(
           + sv_weight     * L_loop_consistency   (Saint-Venant integrability)
           + bounds_weight * L_physical_bounds    (per-component magnitude clamp)
 
-    Setting sv_weight=0 and bounds_weight=0 recovers the vanilla regression loss.
+    Regression is computed on **normalized** Δε (what the network predicts).
+
+    The Saint-Venant and physical-bounds terms must run in **physical** Δε units:
+    ``Δε_phys = Δε_norm * std + mean`` (broadcast over batch). If this conversion
+    were skipped and ``max_abs_strain`` (e.g. 0.05) were applied to normalized
+    tensors, almost every correct prediction would be penalised and the model
+    collapses to predicting ~0 in normalized space (flat scatter plots).
 
     Args:
-        delta_pred:     (B, 6) predicted Δε.
-        delta_target:   (B, 6) ground-truth Δε.
+        delta_pred:     (B, 6) predicted Δε in normalized training space.
+        delta_target:   (B, 6) ground-truth Δε (normalized).
         pos_a, pos_b:   (B, 2) scan positions (int32).
-        loss_fn:        'huber', 'mae', or 'mse' for the regression term.
-        delta:          Huber δ.
-        sv_weight:      Weight of the Saint-Venant loop-consistency term.
-        bounds_weight:  Weight of the physical-bounds penalty.
-        max_abs_strain: Threshold for physical-bounds penalty (absolute units).
+        delta_mean:     (6,) tensor — train-split mean of Δε per Voigt component.
+        delta_std:      (6,) tensor — train-split std of Δε per component.
+                        Required whenever ``sv_weight`` or ``bounds_weight`` is non-zero.
 
     Returns:
         (total_loss, components_dict) where components_dict contains
         'loss_reg', 'loss_sv', 'loss_bounds' as scalar floats for logging.
     """
-    loss_reg    = strain_loss(delta_pred, delta_target, loss_fn=loss_fn, delta=delta)
-    loss_sv     = loop_consistency_loss(delta_pred, pos_a, pos_b)
-    loss_bounds = physical_bounds_loss(delta_pred, max_abs_strain=max_abs_strain)
+    loss_reg = strain_loss(delta_pred, delta_target, loss_fn=loss_fn, delta=delta)
+
+    need_phys = (sv_weight != 0.0) or (bounds_weight != 0.0)
+    if need_phys:
+        if delta_mean is None or delta_std is None:
+            raise ValueError(
+                "pair_loss requires delta_mean and delta_std (train-split Δε mean/std, "
+                "shape (6,)) whenever sv_weight or bounds_weight is non-zero — "
+                "Saint-Venant and physical_bounds_loss operate in physical strain units."
+            )
+        dm = delta_mean.to(device=delta_pred.device, dtype=delta_pred.dtype)
+        ds = delta_std.to(device=delta_pred.device, dtype=delta_pred.dtype)
+        pred_phys = delta_pred * ds + dm
+        loss_sv = loop_consistency_loss(pred_phys, pos_a, pos_b)
+        loss_bounds = physical_bounds_loss(pred_phys, max_abs_strain=max_abs_strain)
+    else:
+        loss_sv = delta_pred.new_tensor(0.0)
+        loss_bounds = delta_pred.new_tensor(0.0)
 
     total = loss_reg + sv_weight * loss_sv + bounds_weight * loss_bounds
 

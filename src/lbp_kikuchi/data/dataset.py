@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,40 @@ def build_pair_index(
     )
 
 
+def flat_pattern_indices_covering_3x3_centers(
+    center_flat: np.ndarray,
+    grid_rows: int,
+    grid_cols: int,
+) -> np.ndarray:
+    """
+    Union of flat scan indices for every pixel appearing in a 3×3 patch around
+    each centre index.
+
+    Used to compute **input** ``minmax`` / ``zscore`` stats from training-stage
+    patterns only (same convention as Stage 1 ``train_encoder``: statistics never
+    use held-out pixels).
+
+    Args:
+        center_flat:  1-D array of flat indices ``r * grid_cols + c`` of patch centres.
+        grid_rows:    Scan rows.
+        grid_cols:    Scan columns.
+
+    Returns:
+        Sorted unique flat indices into ``X_sq`` (length ``grid_rows * grid_cols``).
+    """
+    centers = np.asarray(center_flat, dtype=np.int64).ravel()
+    needed: set[int] = set()
+    for cf in centers:
+        r = int(cf) // grid_cols
+        c = int(cf) % grid_cols
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < grid_rows and 0 <= cc < grid_cols:
+                    needed.add(rr * grid_cols + cc)
+    return np.array(sorted(needed), dtype=np.int64)
+
+
 def compute_norm_stats(X: np.ndarray, method: str) -> dict:
     if method == "minmax":
         return {"min": float(X.min()), "max": float(X.max())}
@@ -449,6 +484,9 @@ class LazyGridDataset(Dataset):
                      Must not be None (compute from training split in the
                      training script and pass explicitly to val/test splits).
         norm_method: 'minmax' or 'zscore'.
+        img_size:    If set, resize each pattern to (img_size, img_size) in the
+                     DataLoader worker before returning. Doing this on CPU
+                     reduces CPU→GPU transfer by ~6× vs resizing on GPU.
     """
 
     def __init__(
@@ -460,6 +498,7 @@ class LazyGridDataset(Dataset):
         targets: dict[str, np.ndarray],
         stats: dict,
         norm_method: str = "minmax",
+        img_size: int | None = None,
     ):
         X_sq, H, W = _squeeze_channel(X)
         self.X = X_sq                  # (N, H, W) float32 — stored as reference
@@ -470,6 +509,7 @@ class LazyGridDataset(Dataset):
         self.center_idx = center_idx   # (M,) int32
         self.stats = stats
         self.norm_method = norm_method
+        self.img_size = img_size
         self.targets = {k: torch.from_numpy(np.asarray(v, dtype=np.float32))
                         for k, v in targets.items()}
 
@@ -489,7 +529,12 @@ class LazyGridDataset(Dataset):
         ]
         patch = self.X[flat].astype(np.float32)          # (9, H, W) — new allocation
         patch = apply_norm(patch, self.stats, self.norm_method)
-        return torch.tensor(patch[:, None], dtype=torch.float32)  # (9, 1, H, W)
+        t = torch.tensor(patch[:, None], dtype=torch.float32)   # (9, 1, H, W)
+        if self.img_size is not None and (self.H != self.img_size or self.W != self.img_size):
+            with torch.no_grad():
+                t = F.interpolate(t, size=(self.img_size, self.img_size),
+                                  mode="bilinear", align_corners=False)
+        return t
 
     def __len__(self) -> int:
         return len(self.center_idx)
@@ -523,6 +568,9 @@ class LazyGridPairDataset(Dataset):
         stats:       Normalisation stats from compute_norm_stats() on the
                      training split. Must not be None.
         norm_method: 'minmax' or 'zscore'.
+        img_size:    If set, resize each pattern to (img_size, img_size) in the
+                     DataLoader worker before returning. Doing this on CPU
+                     reduces CPU→GPU transfer by ~6× vs resizing on GPU.
     """
 
     def __init__(
@@ -537,6 +585,7 @@ class LazyGridPairDataset(Dataset):
         pos_b: np.ndarray | None = None,
         stats: dict | None = None,
         norm_method: str = "minmax",
+        img_size: int | None = None,
     ):
         X_sq, H, W = _squeeze_channel(X)
         self.X = X_sq
@@ -548,6 +597,7 @@ class LazyGridPairDataset(Dataset):
         self.idx_b = idx_b
         self.stats = stats
         self.norm_method = norm_method
+        self.img_size = img_size
         self.targets = {k: torch.from_numpy(np.asarray(v, dtype=np.float32))
                         for k, v in targets.items()}
         M = len(idx_a)
@@ -574,7 +624,12 @@ class LazyGridPairDataset(Dataset):
         ]
         patch = self.X[flat].astype(np.float32)
         patch = apply_norm(patch, self.stats, self.norm_method)
-        return torch.tensor(patch[:, None], dtype=torch.float32)  # (9, 1, H, W)
+        t = torch.tensor(patch[:, None], dtype=torch.float32)   # (9, 1, H, W)
+        if self.img_size is not None and (self.H != self.img_size or self.W != self.img_size):
+            with torch.no_grad():
+                t = F.interpolate(t, size=(self.img_size, self.img_size),
+                                  mode="bilinear", align_corners=False)
+        return t
 
     def __len__(self) -> int:
         return len(self.idx_a)
